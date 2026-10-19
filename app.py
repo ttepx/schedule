@@ -220,6 +220,16 @@ def step_weekday(d, direction):
     return d
 
 
+def pairs_word(n):
+    if n == 0:
+        return "—"
+    if n % 10 == 1 and n % 100 != 11:
+        return f"{n} пара"
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return f"{n} пари"
+    return f"{n} пар"
+
+
 def find_next_lesson(by_date, now):
     for d in sorted(by_date):
         for c in by_date[d]:
@@ -294,6 +304,7 @@ def home():
         "iso": (monday + datetime.timedelta(days=i)).isoformat(),
         "label": DAY_SHORT[i],
         "num": (monday + datetime.timedelta(days=i)).day,
+        "count": pairs_word(len(by_date.get(monday + datetime.timedelta(days=i), []))),
         "selected": (monday + datetime.timedelta(days=i)) == selected,
         "today": (monday + datetime.timedelta(days=i)) == today,
     } for i in range(5)]
@@ -329,119 +340,177 @@ def home():
 
 STYLE = """
 :root {
-  --paper: #f5f6f8; --surface: #ffffff; --ink: #1b2230; --muted: #667085; --line: #dde1e8;
-  --accent: #2646d6; --mark: rgba(255, 205, 30, .7); --danger: #b42318;
-  --sel-bg: #1b2230; --sel-fg: #ffffff;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --paper: #12151b; --surface: #1a1f27; --ink: #e9ecf1; --muted: #9aa3b2; --line: #2b313c;
-    --accent: #3d5bf0; --mark: rgba(255, 205, 30, .45); --danger: #f97066;
-    --sel-bg: #e9ecf1; --sel-fg: #12151b;
-  }
+  --bg: #0b0f1a; --card: rgba(255,255,255,.045); --card-line: rgba(255,255,255,.09);
+  --text: #f1f4fa; --muted: #98a2b8;
+  --blue: #4f8cff; --blue-2: #2b5cff; --green: #34d399; --amber: #fbbf24; --red: #f87171;
 }
 * { box-sizing: border-box; }
-html { color-scheme: light dark; }
+html { color-scheme: dark; }
 body {
-  margin: 0; background: var(--paper); color: var(--ink);
+  margin: 0; color: var(--text); min-height: 100vh;
   font-family: "Onest", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   font-size: 16px; line-height: 1.5; -webkit-font-smoothing: antialiased;
+  background:
+    radial-gradient(900px 500px at 8% -8%, rgba(60, 100, 220, .28), transparent 60%),
+    radial-gradient(700px 420px at 100% 0%, rgba(20, 184, 166, .18), transparent 55%),
+    var(--bg);
+  background-attachment: fixed;
 }
-:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
-.wrap { max-width: 640px; margin: 0 auto; padding: 20px 20px 56px; }
+:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 8px; }
+.wrap { max-width: 680px; margin: 0 auto; padding: 22px 16px 64px; }
 
-.topbar { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 20px; }
-.brand { font-weight: 700; font-size: 18px; letter-spacing: -.01em; }
-.text-btn {
-  background: none; border: 0; padding: 6px 0; font: inherit; font-size: 14px; color: var(--muted);
-  cursor: pointer; text-decoration: underline; text-underline-offset: 3px;
+.topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
+.title {
+  margin: 0; font-size: 24px; font-weight: 800; letter-spacing: -.02em;
+  background: linear-gradient(90deg, #8ab8ff, #7ff0c8); -webkit-background-clip: text;
+  background-clip: text; color: transparent;
 }
-.text-btn:hover { color: var(--ink); }
+.logout {
+  background: var(--card); border: 1px solid var(--card-line); color: var(--muted);
+  padding: 8px 14px; border-radius: 12px; font: inherit; font-size: 14px; cursor: pointer;
+}
+.logout:hover { color: var(--text); border-color: rgba(255,255,255,.25); }
 
-.next { background: var(--accent); color: #fff; border-radius: 14px; padding: 22px 22px 20px; margin-bottom: 28px; }
-.next .state { font-size: 14px; opacity: .85; }
+/* ── Наступна пара ── */
+.hero {
+  border-radius: 24px; padding: 22px; margin-bottom: 22px; color: #fff;
+  background: linear-gradient(135deg, #2b5cff 0%, #1f8fd1 55%, #14b8a6 100%);
+  box-shadow: 0 18px 40px rgba(20, 60, 160, .35);
+}
+.hero .tag {
+  display: inline-block; font-size: 13px; font-weight: 600; padding: 4px 12px; border-radius: 999px;
+  background: rgba(255,255,255,.2);
+}
 .countdown {
-  font-size: clamp(40px, 12vw, 56px); font-weight: 700; line-height: 1.05; letter-spacing: -.02em;
-  font-variant-numeric: tabular-nums; margin: 2px 0 14px;
+  font-size: clamp(42px, 13vw, 60px); font-weight: 800; line-height: 1.05; letter-spacing: -.02em;
+  font-variant-numeric: tabular-nums; margin: 14px 0 0;
 }
-.next h2 { margin: 0; font-size: 20px; font-weight: 600; line-height: 1.3; }
-.next .when { margin: 4px 0 0; font-size: 14px; opacity: .85; }
-.next-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
-.btn-light {
-  background: #fff; color: #1b2230; border: 0; border-radius: 8px; padding: 10px 16px;
-  font: inherit; font-size: 15px; font-weight: 600; text-decoration: none; cursor: pointer;
+.hero .caption { font-size: 14px; opacity: .9; margin-bottom: 16px; }
+.hero h2 { margin: 0 0 10px; font-size: 21px; font-weight: 700; line-height: 1.3; }
+.hero .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.hero .chip { background: rgba(255,255,255,.18); color: #fff; }
+.hero-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+.btn-white {
+  background: #fff; color: #12306e; border: 0; border-radius: 14px; padding: 12px 18px;
+  font: inherit; font-size: 15px; font-weight: 700; text-decoration: none; cursor: pointer;
 }
-.btn-line {
-  background: transparent; color: #fff; border: 1px solid rgba(255,255,255,.55); border-radius: 8px;
-  padding: 10px 16px; font: inherit; font-size: 15px; cursor: pointer;
+.btn-white:hover { background: #eef4ff; }
+.btn-ghost {
+  background: rgba(255,255,255,.14); color: #fff; border: 1px solid rgba(255,255,255,.4);
+  border-radius: 14px; padding: 12px 18px; font: inherit; font-size: 15px; cursor: pointer;
 }
-.btn-line:disabled { opacity: .7; cursor: default; }
-.auto { display: flex; gap: 10px; align-items: flex-start; margin-top: 16px; font-size: 14px; cursor: pointer; }
-.auto input { width: 18px; height: 18px; margin-top: 2px; accent-color: #fff; flex-shrink: 0; }
+.btn-ghost:hover { background: rgba(255,255,255,.22); }
+.btn-ghost:disabled { opacity: .75; cursor: default; }
+.switch {
+  display: flex; gap: 12px; align-items: flex-start; margin-top: 18px; padding-top: 16px;
+  border-top: 1px solid rgba(255,255,255,.28); cursor: pointer;
+}
+.switch input {
+  -webkit-appearance: none; appearance: none; flex: 0 0 auto; width: 46px; height: 28px; margin: 1px 0 0;
+  border-radius: 14px; background: rgba(255,255,255,.3); position: relative; cursor: pointer;
+  transition: background .2s;
+}
+.switch input::after {
+  content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px;
+  border-radius: 50%; background: #fff; transition: transform .2s;
+}
+.switch input:checked { background: #10b981; }
+.switch input:checked::after { transform: translateX(18px); }
+.switch b { display: block; font-weight: 700; font-size: 15px; }
+.switch span { display: block; font-size: 13px; opacity: .9; line-height: 1.4; }
 
-.week { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin-bottom: 26px; }
+/* ── Дні тижня ── */
+.week { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-bottom: 22px; }
 .day {
-  display: flex; flex-direction: column; align-items: center; padding: 8px 0 10px; border-radius: 10px;
-  border: 1px solid var(--line); background: var(--surface); color: var(--ink); text-decoration: none;
+  display: flex; flex-direction: column; align-items: center; gap: 1px; padding: 10px 2px 9px;
+  border-radius: 16px; background: var(--card); border: 1px solid var(--card-line);
+  color: var(--text); text-decoration: none; transition: background .15s, border-color .15s;
 }
-.day:hover { border-color: var(--muted); }
+.day:hover { background: rgba(255,255,255,.08); }
 .day .wd { font-size: 13px; color: var(--muted); }
-.day .dn { font-size: 20px; font-weight: 600; line-height: 1.3; font-variant-numeric: tabular-nums; }
-.day.today .dn span { box-shadow: inset 0 -.4em 0 var(--mark); }
-.day.sel { background: var(--sel-bg); border-color: var(--sel-bg); color: var(--sel-fg); }
-.day.sel .wd { color: inherit; opacity: .75; }
+.day .dn { font-size: 21px; font-weight: 800; line-height: 1.25; font-variant-numeric: tabular-nums; }
+.day .cnt { font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.day.today { border-color: rgba(251, 191, 36, .65); }
+.day.today .wd { color: var(--amber); }
+.day.sel { background: linear-gradient(160deg, #3b6dff, #2b5cff); border-color: transparent; box-shadow: 0 8px 20px rgba(43, 92, 255, .4); }
+.day.sel .wd, .day.sel .cnt { color: rgba(255,255,255,.85); }
 
-.dayhead { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.dayhead h1 { font-size: 22px; font-weight: 700; margin: 0; letter-spacing: -.01em; }
-.steps { display: flex; gap: 6px; align-items: center; }
-.step {
-  width: 36px; height: 36px; display: grid; place-items: center; border: 1px solid var(--line);
-  border-radius: 8px; background: var(--surface); color: var(--ink); text-decoration: none; font-size: 18px;
+/* ── Заголовок дня ── */
+.dayhead { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.dayhead h2 { margin: 0; font-size: 19px; font-weight: 800; line-height: 1.3; }
+.badge-today {
+  display: inline-block; margin-left: 8px; white-space: nowrap; padding: 3px 10px; border-radius: 999px; vertical-align: 2px;
+  font-size: 12.5px; font-weight: 700; color: var(--green); background: rgba(52, 211, 153, .15);
 }
-.step:hover { border-color: var(--muted); }
-.jump { font-size: 14px; color: var(--accent); text-decoration: none; margin-right: 6px; }
+.steps { display: flex; gap: 8px; align-items: center; }
+.step {
+  width: 40px; height: 40px; display: grid; place-items: center; border-radius: 12px;
+  background: var(--card); border: 1px solid var(--card-line); color: var(--text);
+  text-decoration: none; font-size: 18px;
+}
+.step:hover { background: rgba(255,255,255,.09); }
+.jump { font-size: 14px; color: var(--blue); text-decoration: none; padding: 0 4px; }
 .jump:hover { text-decoration: underline; }
 
-.list { list-style: none; margin: 12px 0 0; padding: 0; border-top: 1px solid var(--line); }
-.row {
-  display: grid; grid-template-columns: 60px 1fr auto; gap: 16px; align-items: start;
-  padding: 16px 0; border-bottom: 1px solid var(--line); position: relative;
+/* ── Пари ── */
+.lessons { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+.lesson {
+  display: grid; grid-template-columns: 58px 1fr; gap: 14px; padding: 16px; border-radius: 20px;
+  background: var(--card); border: 1px solid var(--card-line);
 }
-.row.past { opacity: .5; }
-.row.current::before {
-  content: ""; position: absolute; left: -14px; top: 14px; bottom: 14px; width: 4px;
-  border-radius: 2px; background: var(--accent);
+.lesson.past { opacity: .55; }
+.lesson.current { border-color: rgba(52, 211, 153, .6); box-shadow: 0 0 0 3px rgba(52, 211, 153, .12); }
+.num {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  height: 58px; border-radius: 16px; background: rgba(79, 140, 255, .16); color: #a9c7ff;
 }
-.t-start { font-size: 20px; font-weight: 700; line-height: 1.2; font-variant-numeric: tabular-nums; }
-.t-end { font-size: 14px; color: var(--muted); font-variant-numeric: tabular-nums; }
-.name { font-size: 17px; font-weight: 600; line-height: 1.3; }
-.meta { font-size: 14px; color: var(--muted); margin-top: 2px; }
-.nb { white-space: nowrap; }
-.now { font-size: 13px; font-weight: 600; color: var(--accent); margin-top: 4px; }
+.num b { font-size: 24px; font-weight: 800; line-height: 1; }
+.num small { font-size: 11.5px; margin-top: 2px; }
+.lesson.current .num { background: rgba(52, 211, 153, .18); color: var(--green); }
+.name { font-size: 18px; font-weight: 700; line-height: 1.3; }
+.status { display: inline-block; font-size: 12.5px; font-weight: 700; padding: 2px 10px; border-radius: 999px; margin-bottom: 6px; }
+.status.live { color: var(--green); background: rgba(52, 211, 153, .15); }
+.status.done { color: var(--muted); background: rgba(255,255,255,.07); }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.chip { font-size: 14px; padding: 4px 10px; border-radius: 10px; background: rgba(255,255,255,.07); color: #d5dbe8; }
+.group { font-size: 13.5px; color: var(--muted); margin-top: 8px; }
+.zoom, .nolink { grid-column: 1 / -1; text-align: center; }
 .zoom {
-  background: var(--accent); color: #fff; text-decoration: none; font-size: 14px; font-weight: 600;
-  padding: 8px 14px; border-radius: 8px;
+  display: block; padding: 12px; border-radius: 14px; font-size: 15px; font-weight: 700;
+  color: #fff; text-decoration: none; background: linear-gradient(135deg, #3b6dff, #2b8cff);
+  box-shadow: 0 6px 16px rgba(43, 92, 255, .35); transition: transform .15s, box-shadow .15s;
 }
-.zoom:hover { filter: brightness(1.1); }
-.empty { padding: 28px 0; color: var(--muted); }
-.empty a { color: var(--accent); }
+.zoom:hover { transform: translateY(-1px); box-shadow: 0 10px 22px rgba(43, 92, 255, .5); }
+.nolink { font-size: 13px; color: var(--muted); }
+@media (min-width: 560px) {
+  .lesson { grid-template-columns: 58px 1fr auto; align-items: center; }
+  .zoom, .nolink { grid-column: auto; }
+  .zoom { padding: 11px 18px; white-space: nowrap; }
+}
+.empty { text-align: center; padding: 36px 20px; border-radius: 20px; background: var(--card); border: 1px solid var(--card-line); color: var(--muted); }
+.empty .big { font-size: 34px; margin-bottom: 6px; }
+.empty a { color: var(--blue); }
 
-.login { max-width: 400px; margin: 0 auto; padding: 56px 20px; }
-.login h1 { font-size: 28px; margin: 0 0 8px; letter-spacing: -.02em; }
-.lead { color: var(--muted); margin: 0 0 28px; }
+/* ── Вхід ── */
+.login { max-width: 420px; margin: 0 auto; padding: 48px 16px; }
+.panel { border-radius: 24px; padding: 26px 22px; background: var(--card); border: 1px solid var(--card-line); box-shadow: 0 20px 40px rgba(0,0,0,.35); }
+.logo { font-size: 40px; line-height: 1; margin-bottom: 10px; }
+.panel h1 { margin: 0 0 6px; font-size: 26px; font-weight: 800; letter-spacing: -.02em; }
+.lead { color: var(--muted); margin: 0 0 22px; font-size: 15px; }
 .f { display: block; font-size: 14px; font-weight: 600; margin: 0 0 6px; }
 .field {
-  width: 100%; padding: 12px 14px; margin-bottom: 18px; border: 1px solid var(--line);
-  border-radius: 8px; background: var(--surface); color: var(--ink); font: inherit;
+  width: 100%; padding: 13px 14px; margin-bottom: 16px; border-radius: 14px; font: inherit;
+  border: 1px solid var(--card-line); background: rgba(255,255,255,.06); color: var(--text);
 }
-.field:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); }
+.field:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px rgba(79,140,255,.25); }
 .submit {
-  width: 100%; padding: 13px; border: 0; border-radius: 8px; background: var(--accent); color: #fff;
-  font: inherit; font-weight: 600; cursor: pointer;
+  width: 100%; padding: 14px; border: 0; border-radius: 14px; color: #fff; font: inherit; font-weight: 700;
+  font-size: 16px; cursor: pointer; background: linear-gradient(135deg, #3b6dff, #2b8cff);
+  box-shadow: 0 8px 20px rgba(43, 92, 255, .4);
 }
-.submit:hover { filter: brightness(1.1); }
-.note { font-size: 13.5px; color: var(--muted); margin-top: 22px; line-height: 1.55; }
-.err { border-left: 3px solid var(--danger); padding: 8px 12px; margin-bottom: 20px; color: var(--danger); font-size: 15px; }
+.submit:hover { filter: brightness(1.08); }
+.note { display: flex; gap: 10px; margin-top: 20px; padding: 12px 14px; border-radius: 14px; font-size: 13px; line-height: 1.5; color: var(--muted); background: rgba(255,255,255,.04); }
+.err { padding: 12px 14px; margin-bottom: 18px; border-radius: 14px; font-size: 14.5px; color: #fecaca; background: rgba(248,113,113,.12); border: 1px solid rgba(248,113,113,.35); }
 """
 
 HEAD = """<!DOCTYPE html>
@@ -449,28 +518,31 @@ HEAD = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#2646d6">
-  <title>Розклад</title>
+  <meta name="theme-color" content="#0b0f1a">
+  <title>Мій розклад</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <style>__STYLE__</style>
 </head>
 """.replace("__STYLE__", STYLE)
 
 LOGIN_TEMPLATE = HEAD + """<body>
 <main class="login">
-  <h1>Вхід у lCloud</h1>
-  <p class="lead">Покажемо розклад вашої групи на тиждень.</p>
-  {% if error %}<div class="err" role="alert">{{ error }}</div>{% endif %}
-  <form method="POST" action="/login">
-    <label class="f" for="login">Логін або телефон</label>
-    <input class="field" id="login" type="text" name="login" autocomplete="username" maxlength="200" required autofocus>
-    <label class="f" for="password">Пароль</label>
-    <input class="field" id="password" type="password" name="password" autocomplete="current-password" maxlength="100" required>
-    <button class="submit" type="submit">Увійти</button>
-  </form>
-  <p class="note">Сайт неофіційний і не пов'язаний з коледжем чи lCloud. Пароль потрібен один раз, щоб увійти в lCloud, і ніде не зберігається. У браузері лишається зашифрована сесія на 12 годин, а кнопка «Вийти» її видаляє.</p>
+  <div class="panel">
+    <div class="logo">📅</div>
+    <h1>Мій розклад</h1>
+    <p class="lead">Увійдіть своїм акаунтом lCloud, і ми покажемо розклад вашої групи.</p>
+    {% if error %}<div class="err" role="alert">{{ error }}</div>{% endif %}
+    <form method="POST" action="/login">
+      <label class="f" for="login">Логін або телефон</label>
+      <input class="field" id="login" type="text" name="login" autocomplete="username" maxlength="200" required autofocus>
+      <label class="f" for="password">Пароль</label>
+      <input class="field" id="password" type="password" name="password" autocomplete="current-password" maxlength="100" required>
+      <button class="submit" type="submit">Увійти</button>
+    </form>
+    <div class="note"><span>🔒</span><span>Сайт неофіційний і не пов'язаний з коледжем чи lCloud. Пароль потрібен один раз, щоб увійти в lCloud, і ніде не зберігається. У браузері лишається зашифрована сесія на 12 годин, кнопка «Вийти» її видаляє.</span></div>
+  </div>
 </main>
 </body>
 </html>
@@ -478,9 +550,11 @@ LOGIN_TEMPLATE = HEAD + """<body>
 
 ERROR_TEMPLATE = HEAD + """<body>
 <main class="login">
-  <h1>Не вдалося завантажити</h1>
-  <div class="err" role="alert">{{ message }}</div>
-  <p><a href="/" style="color: var(--accent)">Спробувати ще раз</a></p>
+  <div class="panel">
+    <h1>Не вдалося завантажити</h1>
+    <div class="err" role="alert">{{ message }}</div>
+    <a class="submit" style="display:block; text-align:center; text-decoration:none" href="/">Спробувати ще раз</a>
+  </div>
 </main>
 </body>
 </html>
@@ -490,26 +564,35 @@ MAIN_TEMPLATE = HEAD + """<body>
 <div class="wrap">
 
   <header class="topbar">
-    <span class="brand">Розклад</span>
-    <form method="POST" action="/logout"><button class="text-btn" type="submit">Вийти</button></form>
+    <h1 class="title">📅 Мій розклад</h1>
+    <form method="POST" action="/logout"><button class="logout" type="submit">Вийти</button></form>
   </header>
 
   {% if next_lesson %}
-  <section class="next" id="nextCard" aria-label="Наступна пара"
+  <section class="hero" id="nextCard" aria-label="Наступна пара"
            data-start="{{ next_lesson.start_iso }}" data-end="{{ next_lesson.end_iso }}"
            data-title="{{ next_lesson.lesson }}" data-zoom="{{ next_lesson.zoom_link or '' }}">
-    <div class="state" id="nextLabel">До початку пари</div>
+    <span class="tag">Наступна пара</span>
     <div class="countdown" id="countdown">00:00:00</div>
+    <div class="caption" id="nextLabel">до початку пари</div>
     <h2>{{ next_lesson.lesson }}</h2>
-    <p class="when">{{ next_lesson.when }}, {{ next_lesson.pair }} пара, {{ next_lesson.start }}–{{ next_lesson.end }}{% if next_lesson.room %}, аудиторія {{ next_lesson.room }}{% endif %}</p>
-    <div class="next-actions">
+    <div class="chips">
+      <span class="chip">🗓 {{ next_lesson.when }}</span>
+      <span class="chip">⏰ {{ next_lesson.start }} – {{ next_lesson.end }}</span>
+      <span class="chip">{{ next_lesson.pair }} пара</span>
+      {% if next_lesson.room %}<span class="chip">🏫 ауд. {{ next_lesson.room }}</span>{% endif %}
+    </div>
+    <div class="hero-actions">
       {% if next_lesson.zoom_link %}
-        <a class="btn-light" href="{{ next_lesson.zoom_link }}" target="_blank" rel="noopener noreferrer">Підключитися до Zoom</a>
+        <a class="btn-white" href="{{ next_lesson.zoom_link }}" target="_blank" rel="noopener noreferrer">🎥 Підключитися до Zoom</a>
       {% endif %}
-      <button type="button" class="btn-line" id="notifyBtn">Нагадати за 5 хвилин</button>
+      <button type="button" class="btn-ghost" id="notifyBtn">🔔 Нагадати за 5 хв</button>
     </div>
     {% if next_lesson.zoom_link %}
-    <label class="auto"><input type="checkbox" id="autoJoin"> Відкрити Zoom автоматично за хвилину до початку (вкладка має бути відкрита)</label>
+    <label class="switch">
+      <input type="checkbox" id="autoJoin">
+      <div><b>Автопідключення</b><span>Zoom відкриється сам за хвилину до початку. Вкладка з сайтом має бути відкрита.</span></div>
+    </label>
     {% endif %}
   </section>
   {% endif %}
@@ -518,13 +601,14 @@ MAIN_TEMPLATE = HEAD + """<body>
     {% for d in week_days %}
       <a href="/?date={{ d.iso }}" class="day{% if d.selected %} sel{% endif %}{% if d.today %} today{% endif %}"{% if d.selected %} aria-current="date"{% endif %}>
         <span class="wd">{{ d.label }}</span>
-        <span class="dn"><span>{{ d.num }}</span></span>
+        <span class="dn">{{ d.num }}</span>
+        <span class="cnt">{{ d.count }}</span>
       </a>
     {% endfor %}
   </nav>
 
   <div class="dayhead">
-    <h1>{{ day_title }}</h1>
+    <h2>{{ day_title }}{% if is_today %}<span class="badge-today">Сьогодні</span>{% endif %}</h2>
     <div class="steps">
       {% if not is_today %}<a class="jump" href="/?date={{ today_iso }}">Сьогодні</a>{% endif %}
       <a class="step" href="/?date={{ prev_date }}" aria-label="Попередній день">‹</a>
@@ -533,26 +617,32 @@ MAIN_TEMPLATE = HEAD + """<body>
   </div>
 
   {% if lessons %}
-  <ol class="list">
+  <ol class="lessons">
     {% for item in lessons %}
-    <li class="row {{ item.state }}">
-      <div>
-        <div class="t-start">{{ item.start }}</div>
-        <div class="t-end">{{ item.end }}</div>
-      </div>
-      <div>
+    <li class="lesson {{ item.state }}">
+      <div class="num"><b>{{ item.pair }}</b><small>пара</small></div>
+      <div class="info">
+        {% if item.state == 'current' %}<span class="status live">Зараз іде</span>{% elif item.state == 'past' %}<span class="status done">Завершилась</span>{% endif %}
         <div class="name">{{ item.lesson }}</div>
-        <div class="meta">{{ item.pair }} пара{% if item.room %}, аудиторія {{ item.room }}{% endif %}{% if item.group %}, <span class="nb">{{ item.group }}</span>{% endif %}</div>
-        {% if item.state == 'current' %}<div class="now">Іде зараз</div>{% endif %}
+        <div class="chips">
+          <span class="chip">⏰ {{ item.start }} – {{ item.end }}</span>
+          {% if item.room %}<span class="chip">🏫 ауд. {{ item.room }}</span>{% endif %}
+        </div>
+        {% if item.group %}<div class="group">👥 {{ item.group }}</div>{% endif %}
       </div>
-      <div>
-        {% if item.zoom_link %}<a class="zoom" href="{{ item.zoom_link }}" target="_blank" rel="noopener noreferrer">Zoom</a>{% endif %}
-      </div>
+      {% if item.zoom_link %}
+        <a class="zoom" href="{{ item.zoom_link }}" target="_blank" rel="noopener noreferrer">🎥 Підключитися до Zoom</a>
+      {% else %}
+        <span class="nolink">Посилання на Zoom немає</span>
+      {% endif %}
     </li>
     {% endfor %}
   </ol>
   {% else %}
-  <p class="empty">На цей день занять немає. <a href="/?date={{ next_date }}">Наступний день</a></p>
+  <div class="empty">
+    <div class="big">🎉</div>
+    На цей день занять немає.<br><a href="/?date={{ next_date }}">Подивитись наступний день</a>
+  </div>
   {% endif %}
 </div>
 
@@ -589,9 +679,9 @@ MAIN_TEMPLATE = HEAD + """<body>
       window.location.href = zoom;
       return;
     }
-    if (now >= end) { label.textContent = 'Пара завершилась, оновіть сторінку'; cd.textContent = '00:00:00'; return; }
-    if (now >= start) { label.textContent = 'До кінця пари'; cd.textContent = fmt(end - now); return; }
-    label.textContent = 'До початку пари';
+    if (now >= end) { label.textContent = 'пара завершилась, оновіть сторінку'; cd.textContent = '00:00:00'; return; }
+    if (now >= start) { label.textContent = 'до кінця пари'; cd.textContent = fmt(end - now); return; }
+    label.textContent = 'до початку пари';
     cd.textContent = fmt(start - now);
   }
   tick(); setInterval(tick, 1000);
@@ -604,7 +694,7 @@ MAIN_TEMPLATE = HEAD + """<body>
       var wait = start - new Date() - 5 * 60 * 1000;
       if (wait <= 0) { btn.textContent = 'Пара вже скоро почнеться'; return; }
       setTimeout(function () { new Notification('Пара через 5 хвилин', { body: card.dataset.title }); }, wait);
-      btn.textContent = 'Нагадаю (не закривайте вкладку)';
+      btn.textContent = '✅ Нагадаю (не закривайте вкладку)';
       btn.disabled = true;
     });
   });

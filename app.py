@@ -34,6 +34,8 @@ HEADERS = {
 }
 DAY_NAMES = ["Понеділок", "Вівторок", "Середа", "Четвер", "П'ятниця", "Субота", "Неділя"]
 DAY_SHORT = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Нд"]
+MONTHS = ["січня", "лютого", "березня", "квітня", "травня", "червня", "липня",
+          "серпня", "вересня", "жовтня", "листопада", "грудня"]
 
 app = Flask(__name__)
 
@@ -226,8 +228,15 @@ def find_next_lesson(by_date, now):
             if end > now:
                 start = datetime.datetime.combine(
                     d, datetime.datetime.strptime(c["start"], "%H:%M").time(), tzinfo=TZ)
+                diff = (d - now.date()).days
+                if diff == 0:
+                    when = "Сьогодні"
+                elif diff == 1:
+                    when = "Завтра"
+                else:
+                    when = f"{DAY_NAMES[d.weekday()]}, {d.day} {MONTHS[d.month - 1]}"
                 return {**c, "start_iso": start.isoformat(), "end_iso": end.isoformat(),
-                        "date_str": f"{DAY_SHORT[d.weekday()]}, {d.strftime('%d.%m')}"}
+                        "when": when}
     return None
 
 
@@ -284,7 +293,7 @@ def home():
     week_days = [{
         "iso": (monday + datetime.timedelta(days=i)).isoformat(),
         "label": DAY_SHORT[i],
-        "num": (monday + datetime.timedelta(days=i)).strftime("%d.%m"),
+        "num": (monday + datetime.timedelta(days=i)).day,
         "selected": (monday + datetime.timedelta(days=i)) == selected,
         "today": (monday + datetime.timedelta(days=i)) == today,
     } for i in range(5)]
@@ -293,11 +302,23 @@ def home():
     if monday <= today <= monday + datetime.timedelta(days=4):
         next_lesson = find_next_lesson(by_date, now)
 
+    lessons = []
+    for c in by_date.get(selected, []):
+        state = "upcoming"
+        if selected == today:
+            st = datetime.datetime.combine(selected, datetime.datetime.strptime(c["start"], "%H:%M").time(), tzinfo=TZ)
+            en = datetime.datetime.combine(selected, datetime.datetime.strptime(c["end"], "%H:%M").time(), tzinfo=TZ)
+            state = "past" if en <= now else ("current" if st <= now else "upcoming")
+        elif selected < today:
+            state = "past"
+        lessons.append({**c, "state": state})
+
+    year_part = f" {selected.year}" if selected.year != today.year else ""
     return render_template_string(
         MAIN_TEMPLATE,
-        lessons=by_date.get(selected, []),
+        lessons=lessons,
         week_days=week_days,
-        day_title=f"{DAY_NAMES[selected.weekday()]}, {selected.strftime('%d.%m.%Y')}",
+        day_title=f"{DAY_NAMES[selected.weekday()]}, {selected.day} {MONTHS[selected.month - 1]}{year_part}",
         is_today=selected == today,
         prev_date=step_weekday(selected, -1).isoformat(),
         next_date=step_weekday(selected, 1).isoformat(),
@@ -307,347 +328,232 @@ def home():
 
 
 STYLE = """
-        :root {
-            --bg-gradient: radial-gradient(circle at top left, #121824, #080a0f);
-            --card-bg: rgba(255, 255, 255, 0.03);
-            --card-border: rgba(255, 255, 255, 0.08);
-            --accent-glow: #3b82f6;
-            --accent-hover: #60a5fa;
-            --accent-green: #10b981;
-            --zoom-color: #2d8cff;
-            --text-main: #f3f4f6;
-            --text-muted: #9ca3af;
-        }
+:root {
+  --paper: #f5f6f8; --surface: #ffffff; --ink: #1b2230; --muted: #667085; --line: #dde1e8;
+  --accent: #2646d6; --mark: rgba(255, 205, 30, .7); --danger: #b42318;
+  --sel-bg: #1b2230; --sel-fg: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #12151b; --surface: #1a1f27; --ink: #e9ecf1; --muted: #9aa3b2; --line: #2b313c;
+    --accent: #3d5bf0; --mark: rgba(255, 205, 30, .45); --danger: #f97066;
+    --sel-bg: #e9ecf1; --sel-fg: #12151b;
+  }
+}
+* { box-sizing: border-box; }
+html { color-scheme: light dark; }
+body {
+  margin: 0; background: var(--paper); color: var(--ink);
+  font-family: "Onest", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 16px; line-height: 1.5; -webkit-font-smoothing: antialiased;
+}
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.wrap { max-width: 640px; margin: 0 auto; padding: 20px 20px 56px; }
 
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Inter", sans-serif;
-            background: var(--bg-gradient);
-            color: var(--text-main);
-            margin: 0;
-            padding: 24px 16px;
-            min-height: 100vh;
-            display: flex;
-            justify-content: center;
-        }
+.topbar { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 20px; }
+.brand { font-weight: 700; font-size: 18px; letter-spacing: -.01em; }
+.text-btn {
+  background: none; border: 0; padding: 6px 0; font: inherit; font-size: 14px; color: var(--muted);
+  cursor: pointer; text-decoration: underline; text-underline-offset: 3px;
+}
+.text-btn:hover { color: var(--ink); }
 
-        .container {
-            width: 100%;
-            max-width: 720px;
-        }
+.next { background: var(--accent); color: #fff; border-radius: 14px; padding: 22px 22px 20px; margin-bottom: 28px; }
+.next .state { font-size: 14px; opacity: .85; }
+.countdown {
+  font-size: clamp(40px, 12vw, 56px); font-weight: 700; line-height: 1.05; letter-spacing: -.02em;
+  font-variant-numeric: tabular-nums; margin: 2px 0 14px;
+}
+.next h2 { margin: 0; font-size: 20px; font-weight: 600; line-height: 1.3; }
+.next .when { margin: 4px 0 0; font-size: 14px; opacity: .85; }
+.next-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+.btn-light {
+  background: #fff; color: #1b2230; border: 0; border-radius: 8px; padding: 10px 16px;
+  font: inherit; font-size: 15px; font-weight: 600; text-decoration: none; cursor: pointer;
+}
+.btn-line {
+  background: transparent; color: #fff; border: 1px solid rgba(255,255,255,.55); border-radius: 8px;
+  padding: 10px 16px; font: inherit; font-size: 15px; cursor: pointer;
+}
+.btn-line:disabled { opacity: .7; cursor: default; }
+.auto { display: flex; gap: 10px; align-items: flex-start; margin-top: 16px; font-size: 14px; cursor: pointer; }
+.auto input { width: 18px; height: 18px; margin-top: 2px; accent-color: #fff; flex-shrink: 0; }
 
-        .glass-card {
-            background: var(--card-bg);
-            backdrop-filter: blur(20px);
-            -webkit-backdrop-filter: blur(20px);
-            border: 1px solid var(--card-border);
-            border-radius: 24px;
-            padding: 24px;
-            margin-bottom: 20px;
-            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
-        }
+.week { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin-bottom: 26px; }
+.day {
+  display: flex; flex-direction: column; align-items: center; padding: 8px 0 10px; border-radius: 10px;
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink); text-decoration: none;
+}
+.day:hover { border-color: var(--muted); }
+.day .wd { font-size: 13px; color: var(--muted); }
+.day .dn { font-size: 20px; font-weight: 600; line-height: 1.3; font-variant-numeric: tabular-nums; }
+.day.today .dn span { box-shadow: inset 0 -.4em 0 var(--mark); }
+.day.sel { background: var(--sel-bg); border-color: var(--sel-bg); color: var(--sel-fg); }
+.day.sel .wd { color: inherit; opacity: .75; }
 
-        .header-title {
-            font-size: 24px;
-            font-weight: 800;
-            background: linear-gradient(90deg, #60a5fa, #a7f3d0);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            margin: 0 0 16px 0;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-        }
+.dayhead { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.dayhead h1 { font-size: 22px; font-weight: 700; margin: 0; letter-spacing: -.01em; }
+.steps { display: flex; gap: 6px; align-items: center; }
+.step {
+  width: 36px; height: 36px; display: grid; place-items: center; border: 1px solid var(--line);
+  border-radius: 8px; background: var(--surface); color: var(--ink); text-decoration: none; font-size: 18px;
+}
+.step:hover { border-color: var(--muted); }
+.jump { font-size: 14px; color: var(--accent); text-decoration: none; margin-right: 6px; }
+.jump:hover { text-decoration: underline; }
 
-        .top-bar {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            gap: 12px;
-            margin-bottom: 20px;
-        }
+.list { list-style: none; margin: 12px 0 0; padding: 0; border-top: 1px solid var(--line); }
+.row {
+  display: grid; grid-template-columns: 60px 1fr auto; gap: 16px; align-items: start;
+  padding: 16px 0; border-bottom: 1px solid var(--line); position: relative;
+}
+.row.past { opacity: .5; }
+.row.current::before {
+  content: ""; position: absolute; left: -14px; top: 14px; bottom: 14px; width: 4px;
+  border-radius: 2px; background: var(--accent);
+}
+.t-start { font-size: 20px; font-weight: 700; line-height: 1.2; font-variant-numeric: tabular-nums; }
+.t-end { font-size: 14px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.name { font-size: 17px; font-weight: 600; line-height: 1.3; }
+.meta { font-size: 14px; color: var(--muted); margin-top: 2px; }
+.nb { white-space: nowrap; }
+.now { font-size: 13px; font-weight: 600; color: var(--accent); margin-top: 4px; }
+.zoom {
+  background: var(--accent); color: #fff; text-decoration: none; font-size: 14px; font-weight: 600;
+  padding: 8px 14px; border-radius: 8px;
+}
+.zoom:hover { filter: brightness(1.1); }
+.empty { padding: 28px 0; color: var(--muted); }
+.empty a { color: var(--accent); }
 
-        .quick-btn {
-            background: rgba(59, 130, 246, 0.12);
-            color: var(--accent-hover);
-            border: 1px solid rgba(59, 130, 246, 0.3);
-            padding: 10px 18px;
-            border-radius: 14px;
-            text-decoration: none;
-            font-weight: 600;
-            font-size: 14px;
-            transition: all 0.2s;
-        }
-
-        .quick-btn:hover, .quick-btn.active {
-            background: var(--accent-glow);
-            color: #fff;
-            box-shadow: 0 0 15px rgba(59, 130, 246, 0.4);
-        }
-
-        .days-nav {
-            display: flex;
-            gap: 8px;
-            overflow-x: auto;
-            padding-bottom: 6px;
-        }
-
-        .day-tab {
-            background: rgba(255, 255, 255, 0.04);
-            color: var(--text-muted);
-            padding: 10px 18px;
-            border-radius: 14px;
-            text-decoration: none;
-            font-size: 14px;
-            font-weight: 500;
-            white-space: nowrap;
-            border: 1px solid transparent;
-            transition: all 0.2s;
-        }
-
-        .day-tab:hover {
-            color: var(--text-main);
-            background: rgba(255, 255, 255, 0.08);
-        }
-
-        .day-tab.selected {
-            background: rgba(59, 130, 246, 0.2);
-            color: #fff;
-            border-color: var(--accent-glow);
-            font-weight: 700;
-        }
-
-        .status-header {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            margin-bottom: 20px;
-            border-bottom: 1px solid var(--card-border);
-            padding-bottom: 16px;
-        }
-
-        .lesson-card {
-            background: rgba(255, 255, 255, 0.02);
-            border: 1px solid var(--card-border);
-            border-radius: 18px;
-            padding: 18px;
-            margin-bottom: 14px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            gap: 16px;
-            transition: all 0.2s;
-        }
-
-        .lesson-card:hover {
-            border-color: rgba(96, 165, 250, 0.4);
-            background: rgba(255, 255, 255, 0.04);
-        }
-
-        .pair-badge {
-            font-weight: 800;
-            color: var(--accent-hover);
-            font-size: 18px;
-        }
-
-        .time {
-            color: var(--text-muted);
-            font-size: 13px;
-            margin-top: 4px;
-        }
-
-        .lesson-name {
-            font-size: 16px;
-            font-weight: 700;
-            margin-bottom: 4px;
-        }
-
-        .teacher-name {
-            font-size: 13px;
-            color: var(--text-muted);
-        }
-
-        .zoom-btn {
-            background: var(--zoom-color);
-            color: #fff;
-            padding: 10px 16px;
-            border-radius: 12px;
-            text-decoration: none;
-            font-weight: 700;
-            font-size: 13px;
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            box-shadow: 0 4px 12px rgba(45, 140, 255, 0.3);
-            transition: all 0.2s;
-            white-space: nowrap;
-        }
-
-        .zoom-btn:hover {
-            opacity: 0.9;
-            transform: translateY(-2px);
-            box-shadow: 0 6px 18px rgba(45, 140, 255, 0.5);
-        }
-
-        .empty {
-            text-align: center;
-            color: var(--text-muted);
-            padding: 40px;
-            font-size: 16px;
-        }
-    
-        .title-row { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:16px; }
-        .title-row .header-title { margin:0; }
-        .link-btn { background:none; border:1px solid var(--card-border); color:var(--text-muted); padding:8px 14px; border-radius:12px; cursor:pointer; font-size:13px; }
-        .link-btn:hover { color:var(--text-main); border-color:rgba(255,255,255,0.25); }
-        .nav-row { display:flex; gap:8px; align-items:center; margin-bottom:16px; flex-wrap:wrap; }
-        .arrow { padding:10px 14px; }
-        .day-tab small { display:block; font-size:11px; opacity:.7; }
-        .next-card { border-color: rgba(59,130,246,.45); }
-        .next-label { font-size:12px; color:var(--accent-hover); font-weight:700; text-transform:uppercase; letter-spacing:.08em; margin-bottom:6px; }
-        .next-title { font-size:20px; font-weight:800; margin-bottom:6px; }
-        .countdown { font-size:28px; font-weight:800; margin:12px 0; font-variant-numeric: tabular-nums; }
-        .next-actions { display:flex; gap:10px; flex-wrap:wrap; }
-        .form-field { width:100%; box-sizing:border-box; padding:14px 16px; margin-bottom:12px; border-radius:14px; border:1px solid var(--card-border); background:rgba(255,255,255,.05); color:var(--text-main); font-size:16px; }
-        .form-field:focus { outline:none; border-color:var(--accent-glow); }
-        .primary-btn { width:100%; padding:14px; border-radius:14px; border:none; background:var(--accent-glow); color:#fff; font-weight:700; font-size:16px; cursor:pointer; }
-        .primary-btn:hover { background:var(--accent-hover); }
-        .notice { font-size:12.5px; color:var(--text-muted); line-height:1.5; margin-top:14px; }
-        .error { background:rgba(239,68,68,.12); border:1px solid rgba(239,68,68,.35); color:#fca5a5; padding:12px 14px; border-radius:12px; margin-bottom:14px; font-size:14px; }
-        .room { color: var(--text-muted); font-size:13px; margin-top:4px; }
-        .auto-label { display:flex; gap:10px; align-items:flex-start; margin-top:14px; font-size:13.5px; color:var(--text-muted); cursor:pointer; line-height:1.4; }
-        .auto-label input { margin-top:2px; width:18px; height:18px; accent-color: var(--accent-glow); flex-shrink:0; }
+.login { max-width: 400px; margin: 0 auto; padding: 56px 20px; }
+.login h1 { font-size: 28px; margin: 0 0 8px; letter-spacing: -.02em; }
+.lead { color: var(--muted); margin: 0 0 28px; }
+.f { display: block; font-size: 14px; font-weight: 600; margin: 0 0 6px; }
+.field {
+  width: 100%; padding: 12px 14px; margin-bottom: 18px; border: 1px solid var(--line);
+  border-radius: 8px; background: var(--surface); color: var(--ink); font: inherit;
+}
+.field:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); }
+.submit {
+  width: 100%; padding: 13px; border: 0; border-radius: 8px; background: var(--accent); color: #fff;
+  font: inherit; font-weight: 600; cursor: pointer;
+}
+.submit:hover { filter: brightness(1.1); }
+.note { font-size: 13.5px; color: var(--muted); margin-top: 22px; line-height: 1.55; }
+.err { border-left: 3px solid var(--danger); padding: 8px 12px; margin-bottom: 20px; color: var(--danger); font-size: 15px; }
 """
 
-LOGIN_TEMPLATE = """<!DOCTYPE html>
+HEAD = """<!DOCTYPE html>
 <html lang="uk">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Мій Розклад</title>
-    <style>__STYLE__</style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#2646d6">
+  <title>Розклад</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>__STYLE__</style>
 </head>
-<body>
-<div class="container" style="align-self:center;">
-  <div class="glass-card">
-    <div class="header-title"><span>⚡ Мій розклад</span></div>
-    {% if error %}<div class="error">{{ error }}</div>{% endif %}
-    <form method="POST" action="/login" autocomplete="on">
-      <input class="form-field" type="text" name="login" placeholder="Логін або телефон lCloud"
-             autocomplete="username" maxlength="200" required autofocus>
-      <input class="form-field" type="password" name="password" placeholder="Пароль"
-             autocomplete="current-password" maxlength="100" required>
-      <button class="primary-btn" type="submit">Увійти</button>
-    </form>
-    <p class="notice">🔒 Це неофіційний сайт, він не пов'язаний з коледжем чи lCloud. Пароль використовується
-    один раз, щоб увійти в lCloud, і <b>ніде не зберігається</b>. У вашому браузері лишається лише зашифрована
-    сесія на 12 годин; кнопка «Вийти» її видаляє. Користуйтесь на свій розсуд.</p>
-  </div>
-</div>
+""".replace("__STYLE__", STYLE)
+
+LOGIN_TEMPLATE = HEAD + """<body>
+<main class="login">
+  <h1>Вхід у lCloud</h1>
+  <p class="lead">Покажемо розклад вашої групи на тиждень.</p>
+  {% if error %}<div class="err" role="alert">{{ error }}</div>{% endif %}
+  <form method="POST" action="/login">
+    <label class="f" for="login">Логін або телефон</label>
+    <input class="field" id="login" type="text" name="login" autocomplete="username" maxlength="200" required autofocus>
+    <label class="f" for="password">Пароль</label>
+    <input class="field" id="password" type="password" name="password" autocomplete="current-password" maxlength="100" required>
+    <button class="submit" type="submit">Увійти</button>
+  </form>
+  <p class="note">Сайт неофіційний і не пов'язаний з коледжем чи lCloud. Пароль потрібен один раз, щоб увійти в lCloud, і ніде не зберігається. У браузері лишається зашифрована сесія на 12 годин, а кнопка «Вийти» її видаляє.</p>
+</main>
 </body>
 </html>
-""".replace("__STYLE__", STYLE)
-ERROR_TEMPLATE = """<!DOCTYPE html>
-<html lang="uk">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Мій Розклад</title>
-    <style>__STYLE__</style>
-</head>
-<body>
-<div class="container" style="align-self:center;">
-  <div class="glass-card">
-    <div class="error">{{ message }}</div>
-    <a class="quick-btn" href="/">Оновити</a>
-  </div>
-</div>
+"""
+
+ERROR_TEMPLATE = HEAD + """<body>
+<main class="login">
+  <h1>Не вдалося завантажити</h1>
+  <div class="err" role="alert">{{ message }}</div>
+  <p><a href="/" style="color: var(--accent)">Спробувати ще раз</a></p>
+</main>
 </body>
 </html>
-""".replace("__STYLE__", STYLE)
-MAIN_TEMPLATE = """<!DOCTYPE html>
-<html lang="uk">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Мій Розклад</title>
-    <style>__STYLE__</style>
-</head>
-<body>
-<div class="container">
+"""
 
-  <div class="glass-card">
-    <div class="title-row">
-      <div class="header-title"><span>⚡ Мій розклад</span></div>
-      <form method="POST" action="/logout" style="margin:0"><button class="link-btn" type="submit">Вийти</button></form>
-    </div>
+MAIN_TEMPLATE = HEAD + """<body>
+<div class="wrap">
 
-    <div class="nav-row">
-      <a class="quick-btn arrow" href="/?date={{ prev_date }}" aria-label="Попередній день">◀</a>
-      <a class="quick-btn arrow" href="/?date={{ next_date }}" aria-label="Наступний день">▶</a>
-      <a class="quick-btn" href="/?date={{ today_iso }}">🔥 Сьогодні</a>
-    </div>
-
-    <div class="days-nav">
-      {% for d in week_days %}
-        <a href="/?date={{ d.iso }}" class="day-tab {% if d.selected %}selected{% endif %}">
-          {{ d.label }}<small>{{ d.num }}{% if d.today %} · сьогодні{% endif %}</small>
-        </a>
-      {% endfor %}
-    </div>
-  </div>
+  <header class="topbar">
+    <span class="brand">Розклад</span>
+    <form method="POST" action="/logout"><button class="text-btn" type="submit">Вийти</button></form>
+  </header>
 
   {% if next_lesson %}
-  <div class="glass-card next-card" id="nextCard"
-       data-start="{{ next_lesson.start_iso }}" data-end="{{ next_lesson.end_iso }}"
-       data-title="{{ next_lesson.lesson }}" data-zoom="{{ next_lesson.zoom_link or '' }}">
-    <div class="next-label" id="nextLabel">Наступна пара</div>
-    <div class="next-title">{{ next_lesson.lesson }}</div>
-    <div class="time">📅 {{ next_lesson.date_str }} · {{ next_lesson.pair }} пара · ⏰ {{ next_lesson.time }}</div>
-    <div class="countdown" id="countdown">…</div>
+  <section class="next" id="nextCard" aria-label="Наступна пара"
+           data-start="{{ next_lesson.start_iso }}" data-end="{{ next_lesson.end_iso }}"
+           data-title="{{ next_lesson.lesson }}" data-zoom="{{ next_lesson.zoom_link or '' }}">
+    <div class="state" id="nextLabel">До початку пари</div>
+    <div class="countdown" id="countdown">00:00:00</div>
+    <h2>{{ next_lesson.lesson }}</h2>
+    <p class="when">{{ next_lesson.when }}, {{ next_lesson.pair }} пара, {{ next_lesson.start }}–{{ next_lesson.end }}{% if next_lesson.room %}, аудиторія {{ next_lesson.room }}{% endif %}</p>
     <div class="next-actions">
       {% if next_lesson.zoom_link %}
-        <a href="{{ next_lesson.zoom_link }}" target="_blank" rel="noopener noreferrer" class="zoom-btn">🎥 Підключитися</a>
+        <a class="btn-light" href="{{ next_lesson.zoom_link }}" target="_blank" rel="noopener noreferrer">Підключитися до Zoom</a>
       {% endif %}
-      <button type="button" class="quick-btn" id="notifyBtn">🔔 Нагадати за 5 хв</button>
+      <button type="button" class="btn-line" id="notifyBtn">Нагадати за 5 хвилин</button>
     </div>
     {% if next_lesson.zoom_link %}
-    <label class="auto-label"><input type="checkbox" id="autoJoin"> ⚡ Автопідключення: сама відкрити Zoom за 1 хв до початку (вкладка має бути відкрита)</label>
+    <label class="auto"><input type="checkbox" id="autoJoin"> Відкрити Zoom автоматично за хвилину до початку (вкладка має бути відкрита)</label>
     {% endif %}
-  </div>
+  </section>
   {% endif %}
 
-  <div class="glass-card">
-    <div class="status-header">
-      <h2 style="margin:0; font-size:20px; font-weight:700;">{{ day_title }}
-        {% if is_today %}<span style="color: var(--accent-green); font-size:13px; font-weight:600; margin-left:8px; background: rgba(16,185,129,0.15); padding:4px 10px; border-radius:8px;">Сьогодні</span>{% endif %}
-      </h2>
-    </div>
+  <nav class="week" aria-label="Дні тижня">
+    {% for d in week_days %}
+      <a href="/?date={{ d.iso }}" class="day{% if d.selected %} sel{% endif %}{% if d.today %} today{% endif %}"{% if d.selected %} aria-current="date"{% endif %}>
+        <span class="wd">{{ d.label }}</span>
+        <span class="dn"><span>{{ d.num }}</span></span>
+      </a>
+    {% endfor %}
+  </nav>
 
-    {% if lessons %}
-      {% for item in lessons %}
-      <div class="lesson-card">
-        <div>
-          <div class="pair-badge">{{ item.pair }} пара</div>
-          <div class="time">⏰ {{ item.time }}</div>
-        </div>
-        <div style="flex-grow:1;">
-          <div class="lesson-name">{{ item.lesson }}</div>
-          <div class="teacher-name">👥 {{ item.group }}</div>
-          {% if item.room %}<div class="room">🏫 Аудиторія: {{ item.room }}</div>{% endif %}
-        </div>
-        <div>
-          {% if item.zoom_link %}
-            <a href="{{ item.zoom_link }}" target="_blank" rel="noopener noreferrer" class="zoom-btn">🎥 Zoom</a>
-          {% else %}
-            <span style="font-size:12px; color: var(--text-muted);">Немає посилання</span>
-          {% endif %}
-        </div>
-      </div>
-      {% endfor %}
-    {% else %}
-      <div class="empty">🎉 На цей день занять немає або вихідний!</div>
-    {% endif %}
+  <div class="dayhead">
+    <h1>{{ day_title }}</h1>
+    <div class="steps">
+      {% if not is_today %}<a class="jump" href="/?date={{ today_iso }}">Сьогодні</a>{% endif %}
+      <a class="step" href="/?date={{ prev_date }}" aria-label="Попередній день">‹</a>
+      <a class="step" href="/?date={{ next_date }}" aria-label="Наступний день">›</a>
+    </div>
   </div>
+
+  {% if lessons %}
+  <ol class="list">
+    {% for item in lessons %}
+    <li class="row {{ item.state }}">
+      <div>
+        <div class="t-start">{{ item.start }}</div>
+        <div class="t-end">{{ item.end }}</div>
+      </div>
+      <div>
+        <div class="name">{{ item.lesson }}</div>
+        <div class="meta">{{ item.pair }} пара{% if item.room %}, аудиторія {{ item.room }}{% endif %}{% if item.group %}, <span class="nb">{{ item.group }}</span>{% endif %}</div>
+        {% if item.state == 'current' %}<div class="now">Іде зараз</div>{% endif %}
+      </div>
+      <div>
+        {% if item.zoom_link %}<a class="zoom" href="{{ item.zoom_link }}" target="_blank" rel="noopener noreferrer">Zoom</a>{% endif %}
+      </div>
+    </li>
+    {% endfor %}
+  </ol>
+  {% else %}
+  <p class="empty">На цей день занять немає. <a href="/?date={{ next_date }}">Наступний день</a></p>
+  {% endif %}
 </div>
 
 <script>
@@ -656,6 +562,13 @@ MAIN_TEMPLATE = """<!DOCTYPE html>
   if (!card) return;
   var start = new Date(card.dataset.start), end = new Date(card.dataset.end);
   var cd = document.getElementById('countdown'), label = document.getElementById('nextLabel');
+  var zoom = card.dataset.zoom;
+  var auto = document.getElementById('autoJoin');
+  var doneKey = 'autojoin_done_' + card.dataset.start;
+  var openedBeforeStart = new Date() < start;
+  function store(k, v) {
+    try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; }
+  }
   function pad(n) { return n < 10 ? '0' + n : '' + n; }
   function fmt(ms) {
     var s = Math.max(0, Math.floor(ms / 1000));
@@ -664,11 +577,6 @@ MAIN_TEMPLATE = """<!DOCTYPE html>
     var m = Math.floor(s / 60); s -= m * 60;
     return (d ? d + ' д ' : '') + pad(h) + ':' + pad(m) + ':' + pad(s);
   }
-  var zoom = card.dataset.zoom;
-  var auto = document.getElementById('autoJoin');
-  var doneKey = 'autojoin_done_' + card.dataset.start;
-  var openedBeforeStart = new Date() < start;   // не перекидати, якщо сторінку відкрили вже під час пари
-  function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } }
   if (auto) {
     auto.checked = store('autojoin') === '1';
     auto.addEventListener('change', function () { store('autojoin', auto.checked ? '1' : '0'); });
@@ -681,24 +589,22 @@ MAIN_TEMPLATE = """<!DOCTYPE html>
       window.location.href = zoom;
       return;
     }
-    if (now >= end) { label.textContent = 'Пара завершилась'; cd.textContent = 'Оновіть сторінку'; return; }
-    if (now >= start) { label.textContent = 'Іде зараз'; cd.textContent = 'до кінця ' + fmt(end - now); return; }
-    label.textContent = 'Наступна пара';
-    cd.textContent = 'до початку ' + fmt(start - now);
+    if (now >= end) { label.textContent = 'Пара завершилась, оновіть сторінку'; cd.textContent = '00:00:00'; return; }
+    if (now >= start) { label.textContent = 'До кінця пари'; cd.textContent = fmt(end - now); return; }
+    label.textContent = 'До початку пари';
+    cd.textContent = fmt(start - now);
   }
   tick(); setInterval(tick, 1000);
 
   var btn = document.getElementById('notifyBtn');
   btn.addEventListener('click', function () {
-    if (!('Notification' in window)) { btn.textContent = 'Браузер не підтримує'; return; }
+    if (!('Notification' in window)) { btn.textContent = 'Браузер не підтримує сповіщень'; return; }
     Notification.requestPermission().then(function (perm) {
       if (perm !== 'granted') { btn.textContent = 'Сповіщення заборонені'; return; }
       var wait = start - new Date() - 5 * 60 * 1000;
-      if (wait <= 0) { btn.textContent = 'Вже скоро початок'; return; }
-      setTimeout(function () {
-        new Notification('Пара через 5 хвилин', { body: card.dataset.title });
-      }, wait);
-      btn.textContent = '✅ Нагадаю (залиште вкладку відкритою)';
+      if (wait <= 0) { btn.textContent = 'Пара вже скоро почнеться'; return; }
+      setTimeout(function () { new Notification('Пара через 5 хвилин', { body: card.dataset.title }); }, wait);
+      btn.textContent = 'Нагадаю (не закривайте вкладку)';
       btn.disabled = true;
     });
   });
@@ -706,7 +612,7 @@ MAIN_TEMPLATE = """<!DOCTYPE html>
 </script>
 </body>
 </html>
-""".replace("__STYLE__", STYLE)
+"""
 
 
 if __name__ == "__main__":

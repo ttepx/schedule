@@ -514,6 +514,8 @@ STYLE = """
         .notice { font-size:12.5px; color:var(--text-muted); line-height:1.5; margin-top:14px; }
         .error { background:rgba(239,68,68,.12); border:1px solid rgba(239,68,68,.35); color:#fca5a5; padding:12px 14px; border-radius:12px; margin-bottom:14px; font-size:14px; }
         .room { color: var(--text-muted); font-size:13px; margin-top:4px; }
+        .auto-label { display:flex; gap:10px; align-items:flex-start; margin-top:14px; font-size:13.5px; color:var(--text-muted); cursor:pointer; line-height:1.4; }
+        .auto-label input { margin-top:2px; width:18px; height:18px; accent-color: var(--accent-glow); flex-shrink:0; }
 """
 
 LOGIN_TEMPLATE = """<!DOCTYPE html>
@@ -597,7 +599,7 @@ MAIN_TEMPLATE = """<!DOCTYPE html>
   {% if next_lesson %}
   <div class="glass-card next-card" id="nextCard"
        data-start="{{ next_lesson.start_iso }}" data-end="{{ next_lesson.end_iso }}"
-       data-title="{{ next_lesson.lesson }}">
+       data-title="{{ next_lesson.lesson }}" data-zoom="{{ next_lesson.zoom_link or '' }}">
     <div class="next-label" id="nextLabel">Наступна пара</div>
     <div class="next-title">{{ next_lesson.lesson }}</div>
     <div class="time">📅 {{ next_lesson.date_str }} · {{ next_lesson.pair }} пара · ⏰ {{ next_lesson.time }}</div>
@@ -608,6 +610,9 @@ MAIN_TEMPLATE = """<!DOCTYPE html>
       {% endif %}
       <button type="button" class="quick-btn" id="notifyBtn">🔔 Нагадати за 5 хв</button>
     </div>
+    {% if next_lesson.zoom_link %}
+    <label class="auto-label"><input type="checkbox" id="autoJoin"> ⚡ Автопідключення: сама відкрити Zoom за 1 хв до початку (вкладка має бути відкрита)</label>
+    {% endif %}
   </div>
   {% endif %}
 
@@ -659,8 +664,23 @@ MAIN_TEMPLATE = """<!DOCTYPE html>
     var m = Math.floor(s / 60); s -= m * 60;
     return (d ? d + ' д ' : '') + pad(h) + ':' + pad(m) + ':' + pad(s);
   }
+  var zoom = card.dataset.zoom;
+  var auto = document.getElementById('autoJoin');
+  var doneKey = 'autojoin_done_' + card.dataset.start;
+  var openedBeforeStart = new Date() < start;   // не перекидати, якщо сторінку відкрили вже під час пари
+  function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } }
+  if (auto) {
+    auto.checked = store('autojoin') === '1';
+    auto.addEventListener('change', function () { store('autojoin', auto.checked ? '1' : '0'); });
+  }
   function tick() {
     var now = new Date();
+    if (auto && auto.checked && zoom && openedBeforeStart && !store(doneKey) &&
+        now >= new Date(start.getTime() - 60 * 1000) && now < end) {
+      store(doneKey, '1');
+      window.location.href = zoom;
+      return;
+    }
     if (now >= end) { label.textContent = 'Пара завершилась'; cd.textContent = 'Оновіть сторінку'; return; }
     if (now >= start) { label.textContent = 'Іде зараз'; cd.textContent = 'до кінця ' + fmt(end - now); return; }
     label.textContent = 'Наступна пара';

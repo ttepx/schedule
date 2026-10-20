@@ -34,6 +34,11 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
     "X-Requested-With": "XMLHttpRequest",
 }
+LOGIN_HEADERS = {
+    **HEADERS,
+    "Accept": "application/json, text/javascript, */*; q=0.01",
+    "Referer": BASE_URL,
+}
 DAY_NAMES = ["Понеділок", "Вівторок", "Середа", "Четвер", "П'ятниця", "Субота", "Неділя"]
 DAY_SHORT = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Нд"]
 MONTHS = ["січня", "лютого", "березня", "квітня", "травня", "червня", "липня",
@@ -57,7 +62,7 @@ def lcloud_login(login, password):
             BASE_URL,
             params={"answer": "json", "do": "users", "func": "login",
                     "login": login, "password": password},
-            headers=HEADERS, timeout=8,
+            headers=LOGIN_HEADERS, timeout=8,
         )
         data = res.json()
     except Exception as exc:

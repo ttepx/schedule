@@ -14,6 +14,8 @@ from bs4 import BeautifulSoup
 from cryptography.fernet import Fernet, InvalidToken
 from flask import Flask, make_response, redirect, render_template_string, request
 
+from teachers import ASSIGNMENTS, TEACHERS
+
 # ───────────────────────── Налаштування ─────────────────────────
 BASE_URL = os.getenv("LCLOUD_BASE_URL", "https://rcnubip.lcloud.in.ua/")
 TZ = ZoneInfo("Europe/Kyiv")
@@ -75,6 +77,49 @@ def safe_link(url):
     return url if urlparse(url).scheme in ("http", "https") else None
 
 
+TEACHER_BY_SHORT = {t["short"]: t for t in TEACHERS}
+TEACHERS_BY_ID = {}
+for _t in TEACHERS:
+    for _i in _t["ids"]:
+        TEACHERS_BY_ID.setdefault(_i, []).append(_t)
+
+
+def zoom_meeting_id(url):
+    m = re.search(r"/(?:j|jc|wc/join)/(\d+)", url or "")
+    return m.group(1) if m else None
+
+
+def find_assigned(card):
+    group = (card["group"].split() or [""])[0]
+    subject = card["lesson"].lower()
+    for part, short in ASSIGNMENTS.get(group, {}).items():
+        if part.lower() in subject:
+            return TEACHER_BY_SHORT.get(short)
+    return None
+
+
+def enrich(card):
+    """Додає викладача й код доступу: за номером Zoom або за налаштуванням ASSIGNMENTS."""
+    card.update(teacher=None, teacher_short=None, code=None, backup_url=None, backup_code=None)
+    cands = TEACHERS_BY_ID.get(zoom_meeting_id(card["zoom_link"]) or "", [])
+    teacher = cands[0] if len(cands) == 1 else find_assigned(card)
+    ref = teacher or (cands[0] if cands else None)
+    if teacher:
+        card["teacher"], card["teacher_short"] = teacher["name"], teacher["short"]
+    if not ref:
+        return card
+    if ref in cands:                      # та сама кімната, що й в lCloud
+        card["zoom_link"] = safe_link(ref["url"]) or card["zoom_link"]
+        card["code"] = ref["code"]
+    elif not card["zoom_link"]:           # в lCloud посилання немає, беремо з PDF
+        card["zoom_link"] = safe_link(ref["url"])
+        card["code"] = ref["code"]
+    else:                                 # в lCloud інша кімната: даємо запасний варіант
+        card["backup_url"] = safe_link(ref["url"])
+        card["backup_code"] = ref["code"]
+    return card
+
+
 CARD_TIME_RE = re.compile(r"№\s*(\d+)\s*\(\s*(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})\s*\)")
 
 
@@ -108,7 +153,7 @@ def parse_cards(html):
             "room": room_el.get_text(strip=True) if room_el else "",
             "zoom_link": safe_link(zoom_el.get("href")) if zoom_el else None,
         })
-    return out
+    return [enrich(c) for c in out]
 
 
 def fetch_day(cookies, day):
@@ -482,6 +527,17 @@ body {
 }
 .zoom:hover { transform: translateY(-1px); box-shadow: 0 10px 22px rgba(43, 92, 255, .5); }
 .nolink { font-size: 13px; color: var(--muted); }
+.teacher { font-size: 14.5px; font-weight: 600; color: #d5dbe8; margin-top: 8px; }
+.code { font-size: 14px; margin-top: 8px; color: #d5dbe8; }
+.code b, .hero-code b, .mono { font-family: ui-monospace, Menlo, Consolas, monospace; letter-spacing: .03em; }
+.hero-code { margin-top: 16px; font-size: 14.5px; }
+.copy {
+  margin-left: 6px; padding: 3px 10px; border-radius: 8px; font: inherit; font-size: 13px; cursor: pointer;
+  color: var(--text); background: rgba(255,255,255,.08); border: 1px solid var(--card-line);
+}
+.copy:hover { background: rgba(255,255,255,.16); }
+.hero .copy { color: #fff; background: rgba(255,255,255,.16); border-color: rgba(255,255,255,.45); }
+.alt { color: var(--blue); }
 @media (min-width: 560px) {
   .lesson { grid-template-columns: 58px 1fr auto; align-items: center; }
   .zoom, .nolink { grid-column: auto; }
@@ -580,6 +636,7 @@ MAIN_TEMPLATE = HEAD + """<body>
       <span class="chip">🗓 {{ next_lesson.when }}</span>
       <span class="chip">⏰ {{ next_lesson.start }} – {{ next_lesson.end }}</span>
       <span class="chip">{{ next_lesson.pair }} пара</span>
+      {% if next_lesson.teacher_short %}<span class="chip">👤 {{ next_lesson.teacher_short }}</span>{% endif %}
       {% if next_lesson.room %}<span class="chip">🏫 ауд. {{ next_lesson.room }}</span>{% endif %}
     </div>
     <div class="hero-actions">
@@ -588,6 +645,9 @@ MAIN_TEMPLATE = HEAD + """<body>
       {% endif %}
       <button type="button" class="btn-ghost" id="notifyBtn">🔔 Нагадати за 5 хв</button>
     </div>
+    {% if next_lesson.code %}
+    <div class="hero-code">🔑 Код доступу: <b>{{ next_lesson.code }}</b> <button type="button" class="copy" data-code="{{ next_lesson.code }}">Скопіювати</button></div>
+    {% endif %}
     {% if next_lesson.zoom_link %}
     <label class="switch">
       <input type="checkbox" id="autoJoin">
@@ -628,7 +688,10 @@ MAIN_TEMPLATE = HEAD + """<body>
           <span class="chip">⏰ {{ item.start }} – {{ item.end }}</span>
           {% if item.room %}<span class="chip">🏫 ауд. {{ item.room }}</span>{% endif %}
         </div>
+        {% if item.teacher %}<div class="teacher">👤 {{ item.teacher }}</div>{% endif %}
         {% if item.group %}<div class="group">👥 {{ item.group }}</div>{% endif %}
+        {% if item.code %}<div class="code">🔑 Код доступу: <b>{{ item.code }}</b> <button type="button" class="copy" data-code="{{ item.code }}">Скопіювати</button></div>{% endif %}
+        {% if item.backup_url %}<div class="group">Запасний варіант: <a class="alt" href="{{ item.backup_url }}" target="_blank" rel="noopener noreferrer">Zoom викладача</a>, код <b class="mono">{{ item.backup_code }}</b></div>{% endif %}
       </div>
       {% if item.zoom_link %}
         <a class="zoom" href="{{ item.zoom_link }}" target="_blank" rel="noopener noreferrer">🎥 Підключитися до Zoom</a>
@@ -647,6 +710,21 @@ MAIN_TEMPLATE = HEAD + """<body>
 </div>
 
 <script>
+(function () {
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest ? e.target.closest('.copy') : null;
+    if (!b) return;
+    var code = b.dataset.code, old = b.textContent;
+    function done() { b.textContent = 'Скопійовано'; setTimeout(function () { b.textContent = old; }, 1500); }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(code).then(done, done);
+    } else {
+      var ta = document.createElement('textarea'); ta.value = code; document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); } catch (err) {}
+      document.body.removeChild(ta); done();
+    }
+  });
+})();
 (function () {
   var card = document.getElementById('nextCard');
   if (!card) return;

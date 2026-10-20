@@ -6,7 +6,7 @@ import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 from zoneinfo import ZoneInfo
 
 import requests
@@ -71,6 +71,11 @@ def lcloud_login(login, password):
     return True, "", s.cookies.get_dict()
 
 
+def _same_site(url):
+    """Адреса аудиторії має бути на сайті lCloud (щоб cookie не пішли кудись інде)."""
+    return url if urlparse(url).netloc == urlparse(BASE_URL).netloc else None
+
+
 def safe_link(url):
     if not url:
         return None
@@ -98,23 +103,92 @@ def find_assigned(card):
     return None
 
 
+def _norm(text):
+    text = text.lower().replace("’", "'").replace("ʼ", "'").replace("`", "'")
+    return re.sub(r"[^а-яіїєґ'a-z\s]", " ", text)
+
+
+def match_pdf_teacher(raw):
+    """Шукає викладача зі списку PDF за прізвищем (і ініціалом, якщо прізвище повторюється)."""
+    toks = _norm(raw or "").split()
+    cands = [t for t in TEACHERS if t["name"].split()[0].lower() in toks]
+    if len(cands) <= 1:
+        return cands[0] if cands else None
+    best = [t for t in cands
+            if t["name"].split()[1].lower() in toks or t["name"].split()[1][0].lower() in toks]
+    return best[0] if len(best) == 1 else None
+
+
+LABEL_RE = re.compile(
+    r"(?i:викладач|педагог)[^:\n]{0,20}:?\s*"
+    r"([А-ЯІЇЄҐ][а-яіїєґ']+(?:\s+[А-ЯІЇЄҐ][а-яіїєґ'.]*){1,2})")
+
+
+def extract_teacher_text(html):
+    """Дістає прізвище викладача зі сторінки віртуальної аудиторії."""
+    text = BeautifulSoup(html, "html.parser").get_text("\n", strip=True)
+    for line in text.split("\n"):                    # 1) збіг із викладачами з PDF
+        if len(line) <= 160:
+            t = match_pdf_teacher(line)
+            if t:
+                return t["name"]
+    m = LABEL_RE.search(text)                        # 2) за підписом «Викладач: ...»
+    return m.group(1).strip() if m else None
+
+
+_TEACHER_CACHE = {}
+
+
+def fetch_teacher_name(cookies, url):
+    hit = _TEACHER_CACHE.get(url)
+    if hit and time.time() - hit[0] < (6 * 3600 if hit[1] else 600):
+        return hit[1]
+    name = None
+    try:
+        s = requests.Session()
+        s.cookies.update(cookies)
+        res = s.get(url, headers={"User-Agent": HEADERS["User-Agent"]}, timeout=8)
+        name = extract_teacher_text(res.text)
+        if not name:
+            print(f"Викладача не знайдено на сторінці {urlparse(url).path}")
+    except Exception:
+        name = None
+    if len(_TEACHER_CACHE) > 2000:
+        _TEACHER_CACHE.clear()
+    _TEACHER_CACHE[url] = (time.time(), name)
+    return name
+
+
+def fetch_teacher_names(cookies, urls):
+    urls = [u for u in urls if u]
+    if not urls:
+        return {}
+    with ThreadPoolExecutor(max_workers=min(8, len(urls))) as pool:
+        return dict(zip(urls, pool.map(lambda u: fetch_teacher_name(cookies, u), urls)))
+
+
 def enrich(card):
-    """Додає викладача й код доступу: за номером Zoom або за налаштуванням ASSIGNMENTS."""
+    """Додає викладача, посилання й код доступу.
+    Порядок: збіг номера Zoom з PDF → прізвище зі сторінки аудиторії → налаштування ASSIGNMENTS."""
     card.update(teacher=None, teacher_short=None, code=None, backup_url=None, backup_code=None)
+    raw = card.get("teacher_raw")
     cands = TEACHERS_BY_ID.get(zoom_meeting_id(card["zoom_link"]) or "", [])
-    teacher = cands[0] if len(cands) == 1 else find_assigned(card)
+    teacher = cands[0] if len(cands) == 1 else None
+    teacher = teacher or match_pdf_teacher(raw) or find_assigned(card)
     ref = teacher or (cands[0] if cands else None)
     if teacher:
         card["teacher"], card["teacher_short"] = teacher["name"], teacher["short"]
+    elif raw:                                         # викладача немає в PDF, показуємо як є
+        card["teacher"], card["teacher_short"] = raw, raw[:40]
     if not ref:
         return card
     if ref in cands:                      # та сама кімната, що й в lCloud
         card["zoom_link"] = safe_link(ref["url"]) or card["zoom_link"]
         card["code"] = ref["code"]
-    elif not card["zoom_link"]:           # в lCloud посилання немає, беремо з PDF
+    elif not card["zoom_link"]:           # в lCloud посилання немає: беремо з PDF
         card["zoom_link"] = safe_link(ref["url"])
         card["code"] = ref["code"]
-    else:                                 # в lCloud інша кімната: даємо запасний варіант
+    else:                                 # в lCloud інша кімната: запасний варіант
         card["backup_url"] = safe_link(ref["url"])
         card["backup_code"] = ref["code"]
     return card
@@ -151,9 +225,10 @@ def parse_cards(html):
             "lesson": subj_el.get_text(" ", strip=True),
             "group": group_el.get_text(" ", strip=True) if group_el else "",
             "room": room_el.get_text(strip=True) if room_el else "",
+            "va_url": _same_site(urljoin(BASE_URL, room_el["href"])) if room_el else None,
             "zoom_link": safe_link(zoom_el.get("href")) if zoom_el else None,
         })
-    return [enrich(c) for c in out]
+    return out
 
 
 def fetch_day(cookies, day):
@@ -354,12 +429,26 @@ def home():
         "today": (monday + datetime.timedelta(days=i)) == today,
     } for i in range(5)]
 
-    next_lesson = None
+    next_raw = None
     if monday <= today <= monday + datetime.timedelta(days=4):
-        next_lesson = find_next_lesson(by_date, now)
+        next_raw = find_next_lesson(by_date, now)
+
+    # Додатковий крок: відкриваємо сторінку аудиторії кожної пари й дізнаємось викладача
+    selected_cards = by_date.get(selected, [])
+    urls = {c["va_url"] for c in selected_cards if c.get("va_url")}
+    if next_raw and next_raw.get("va_url"):
+        urls.add(next_raw["va_url"])
+    names = fetch_teacher_names(cookies, urls)
+
+    def finish(card):
+        card = dict(card)
+        card["teacher_raw"] = names.get(card.get("va_url"))
+        return enrich(card)
+
+    next_lesson = finish(next_raw) if next_raw else None
 
     lessons = []
-    for c in by_date.get(selected, []):
+    for c in selected_cards:
         state = "upcoming"
         if selected == today:
             st = datetime.datetime.combine(selected, datetime.datetime.strptime(c["start"], "%H:%M").time(), tzinfo=TZ)
@@ -367,7 +456,7 @@ def home():
             state = "past" if en <= now else ("current" if st <= now else "upcoming")
         elif selected < today:
             state = "past"
-        lessons.append({**c, "state": state})
+        lessons.append({**finish(c), "state": state})
 
     year_part = f" {selected.year}" if selected.year != today.year else ""
     return render_template_string(

@@ -60,11 +60,14 @@ def lcloud_login(login, password):
             headers=HEADERS, timeout=8,
         )
         data = res.json()
-    except Exception:
-        # Свідомо без тексту помилки: він міг би містити URL із паролем.
+    except Exception as exc:
+        # Лише тип помилки: текст міг би містити URL із паролем.
+        print(f"Вхід: помилка зв'язку з lCloud ({type(exc).__name__})")
         return False, "Не вдалося зв'язатися з lCloud. Спробуйте пізніше.", None
 
     ok = data.get("st") in (True, 1, "1", "true")
+    if not ok:
+        print(f"Вхід відхилено lCloud (st={data.get('st')})")
     msg = BeautifulSoup(str(data.get("text", "")), "html.parser").get_text(" ", strip=True)
     if not ok:
         return False, msg or "Невірний логін або пароль.", None
@@ -243,10 +246,16 @@ def fetch_day(cookies, day):
     try:
         data = res.json()
     except ValueError:
+        print(f"lCloud: відповідь розкладу не JSON (статус {res.status_code})")
         raise SessionExpired()
-    if not isinstance(data, dict) or "text" not in data:
+    if not isinstance(data, dict):
         raise SessionExpired()
-    return parse_cards(data["text"])
+    if "text" not in data:
+        if data.get("st") in (False, 0, "0", "false"):
+            print(f"lCloud: розклад відхилено (st={data.get('st')})")
+            raise SessionExpired()
+        return []                          # день без пар: відповідь без тексту
+    return parse_cards(data["text"] or "")
 
 
 _CACHE = {}
@@ -308,19 +317,28 @@ def clear_session(resp):
     resp.delete_cookie(COOKIE_NAME)
 
 
-# Просте обмеження спроб входу (в межах одного інстанса сервера)
-_ATTEMPTS = {}
+# Обмеження НЕВДАЛИХ спроб входу (в межах одного інстанса сервера).
+# Вдалі входи не рахуються, щоб клас в одній мережі не блокував сам себе.
+_FAILED = {}
+MAX_FAILED = 20
 
 
-def too_many_attempts():
-    ip = (request.headers.get("X-Forwarded-For", request.remote_addr or "?")).split(",")[0].strip()
+def _client_ip():
+    return (request.headers.get("X-Forwarded-For", request.remote_addr or "?")).split(",")[0].strip()
+
+
+def is_blocked():
     now = time.time()
-    hits = [t for t in _ATTEMPTS.get(ip, []) if now - t < 600]
-    hits.append(now)
-    _ATTEMPTS[ip] = hits
-    if len(_ATTEMPTS) > 1000:
-        _ATTEMPTS.clear()
-    return len(hits) > 10
+    hits = [t for t in _FAILED.get(_client_ip(), []) if now - t < 600]
+    return len(hits) >= MAX_FAILED
+
+
+def record_failure():
+    now = time.time()
+    ip = _client_ip()
+    _FAILED[ip] = [t for t in _FAILED.get(ip, []) if now - t < 600] + [now]
+    if len(_FAILED) > 1000:
+        _FAILED.clear()
 
 
 @app.after_request
@@ -373,7 +391,7 @@ def find_next_lesson(by_date, now):
 # ───────────────────────── Сторінки ─────────────────────────
 @app.route("/login", methods=["POST"])
 def login():
-    if too_many_attempts():
+    if is_blocked():
         return render_template_string(LOGIN_TEMPLATE, error="Забагато спроб. Спробуйте за 10 хвилин."), 429
     login_value = (request.form.get("login") or "").strip()
     password = request.form.get("password") or ""
@@ -382,6 +400,7 @@ def login():
     ok, msg, cookies = lcloud_login(login_value, password)
     password = None  # пароль більше не потрібен
     if not ok:
+        record_failure()
         return render_template_string(LOGIN_TEMPLATE, error=msg), 401
     resp = make_response(redirect("/"))
     set_session(resp, cookies)
@@ -416,7 +435,8 @@ def home():
             LOGIN_TEMPLATE, error="Сесія завершилась. Увійдіть ще раз."))
         clear_session(resp)
         return resp
-    except Exception:
+    except Exception as exc:
+        print(f"Розклад: помилка ({type(exc).__name__})")
         return render_template_string(
             ERROR_TEMPLATE, message="Не вдалося отримати розклад. Спробуйте оновити сторінку."), 502
 

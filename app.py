@@ -34,15 +34,24 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
     "X-Requested-With": "XMLHttpRequest",
 }
-LOGIN_HEADERS = {
-    **HEADERS,
-    "Accept": "application/json, text/javascript, */*; q=0.01",
-    "Referer": BASE_URL,
-}
 DAY_NAMES = ["Понеділок", "Вівторок", "Середа", "Четвер", "П'ятниця", "Субота", "Неділя"]
 DAY_SHORT = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Нд"]
 MONTHS = ["січня", "лютого", "березня", "квітня", "травня", "червня", "липня",
           "серпня", "вересня", "жовтня", "листопада", "грудня"]
+
+# ── Суботи: пари «за інший день» ──
+# Суботній розклад повторює розклад одного з буднів і щотижня зсувається:
+# Пн → Вт → Ср → Чт → Пт → знову Пн. Опорна субота й її день задають весь цикл.
+SATURDAY_ANCHOR = datetime.date(2026, 10, 31)   # ця субота: пари за СЕРЕДУ
+SATURDAY_ANCHOR_WEEKDAY = 2                      # 0=Пн, 1=Вт, 2=Ср, 3=Чт, 4=Пт
+# Якщо якась субота випадає з циклу (свята, перенесення), вкажи її тут:
+#   {datetime.date(2026, 12, 26): 0}   # ця субота за понеділок
+SATURDAY_OVERRIDES = {}
+# Дзвінок на суботу (пари по 1 годині). ПЕРЕВІР і виправ під свій коледж!
+# Використовується лише тоді, коли в lCloud на суботу своїх пар немає.
+SATURDAY_BELLS = [("08:00", "09:00"), ("09:10", "10:10"), ("10:20", "11:20"),
+                  ("11:30", "12:30"), ("12:40", "13:40")]
+DAY_ACC = ["понеділок", "вівторок", "середу", "четвер", "п'ятницю"]
 
 app = Flask(__name__)
 
@@ -62,7 +71,7 @@ def lcloud_login(login, password):
             BASE_URL,
             params={"answer": "json", "do": "users", "func": "login",
                     "login": login, "password": password},
-            headers=LOGIN_HEADERS, timeout=8,
+            headers=HEADERS, timeout=8,
         )
         data = res.json()
     except Exception as exc:
@@ -267,8 +276,8 @@ _CACHE = {}
 
 
 def get_schedule(cookies, monday, extra_day=None):
-    """Повертає {date: [картки]} для тижня Пн–Пт (+ додатковий день)."""
-    days = [monday + datetime.timedelta(days=i) for i in range(5)]
+    """Повертає {date: [картки]} для тижня Пн–Сб (+ додатковий день)."""
+    days = [monday + datetime.timedelta(days=i) for i in range(6)]
     if extra_day and extra_day not in days:
         days.append(extra_day)
     key = (hashlib.sha256(json.dumps(cookies, sort_keys=True).encode()).hexdigest(),
@@ -356,9 +365,10 @@ def security_headers(resp):
 
 
 # ───────────────────────── Допоміжні ─────────────────────────
-def step_weekday(d, direction):
+def step_day(d, direction):
+    """Наступний/попередній день, неділі пропускаємо."""
     d += datetime.timedelta(days=direction)
-    while d.weekday() > 4:
+    while d.weekday() == 6:
         d += datetime.timedelta(days=direction)
     return d
 
@@ -373,24 +383,63 @@ def pairs_word(n):
     return f"{n} пар"
 
 
-def find_next_lesson(by_date, now):
+def saturday_weekday(sat):
+    """За який будній день (0=Пн ... 4=Пт) ця субота."""
+    if sat in SATURDAY_OVERRIDES:
+        return SATURDAY_OVERRIDES[sat]
+    weeks = (sat - SATURDAY_ANCHOR).days // 7
+    return (SATURDAY_ANCHOR_WEEKDAY + weeks) % 5
+
+
+def apply_saturday(by_date, monday):
+    """Субота: якщо в lCloud на цю дату пар немає, беремо пари відповідного
+    буднього дня цього ж тижня й ставимо їх на суботній дзвінок."""
+    sat = monday + datetime.timedelta(days=5)
+    if sat not in by_date:
+        return by_date, None
+    wd = saturday_weekday(sat)
+    info = {"weekday": wd, "from_site": bool(by_date[sat])}
+    if by_date[sat]:
+        return by_date, info
+    cards = []
+    for i, c in enumerate(by_date.get(monday + datetime.timedelta(days=wd), [])):
+        start, end = SATURDAY_BELLS[min(i, len(SATURDAY_BELLS) - 1)]
+        cards.append({**c, "date": sat, "pair": i + 1, "start": start, "end": end,
+                      "time": f"{start} - {end}"})
+    result = dict(by_date)
+    result[sat] = cards
+    return result, info
+
+
+def _bounds(d, c):
+    st = datetime.datetime.combine(d, datetime.datetime.strptime(c["start"], "%H:%M").time(), tzinfo=TZ)
+    en = datetime.datetime.combine(d, datetime.datetime.strptime(c["end"], "%H:%M").time(), tzinfo=TZ)
+    return st, en
+
+
+def _decorate(c, d, now):
+    st, en = _bounds(d, c)
+    diff = (d - now.date()).days
+    if diff == 0:
+        when = "Сьогодні"
+    elif diff == 1:
+        when = "Завтра"
+    else:
+        when = f"{DAY_NAMES[d.weekday()]}, {d.day} {MONTHS[d.month - 1]}"
+    return {**c, "start_iso": st.isoformat(), "end_iso": en.isoformat(), "when": when}
+
+
+def find_hero_lessons(by_date, now):
+    """Повертає (пара, що йде зараз; найближча наступна пара)."""
+    current = upcoming = None
     for d in sorted(by_date):
         for c in by_date[d]:
-            end = datetime.datetime.combine(
-                d, datetime.datetime.strptime(c["end"], "%H:%M").time(), tzinfo=TZ)
-            if end > now:
-                start = datetime.datetime.combine(
-                    d, datetime.datetime.strptime(c["start"], "%H:%M").time(), tzinfo=TZ)
-                diff = (d - now.date()).days
-                if diff == 0:
-                    when = "Сьогодні"
-                elif diff == 1:
-                    when = "Завтра"
-                else:
-                    when = f"{DAY_NAMES[d.weekday()]}, {d.day} {MONTHS[d.month - 1]}"
-                return {**c, "start_iso": start.isoformat(), "end_iso": end.isoformat(),
-                        "when": when}
-    return None
+            st, en = _bounds(d, c)
+            if st <= now < en and current is None:
+                current = _decorate(c, d, now)
+            elif st > now and upcoming is None:
+                upcoming = _decorate(c, d, now)
+    return current, upcoming
 
 
 # ───────────────────────── Сторінки ─────────────────────────
@@ -430,7 +479,7 @@ def home():
     try:
         selected = datetime.date.fromisoformat(request.args.get("date", ""))
     except ValueError:
-        selected = today if today.weekday() <= 4 else step_weekday(today, 1)
+        selected = today if today.weekday() <= 5 else step_day(today, 1)
     monday = selected - datetime.timedelta(days=selected.weekday())
 
     try:
@@ -445,24 +494,28 @@ def home():
         return render_template_string(
             ERROR_TEMPLATE, message="Не вдалося отримати розклад. Спробуйте оновити сторінку."), 502
 
-    week_days = [{
-        "iso": (monday + datetime.timedelta(days=i)).isoformat(),
-        "label": DAY_SHORT[i],
-        "num": (monday + datetime.timedelta(days=i)).day,
-        "count": pairs_word(len(by_date.get(monday + datetime.timedelta(days=i), []))),
-        "selected": (monday + datetime.timedelta(days=i)) == selected,
-        "today": (monday + datetime.timedelta(days=i)) == today,
-    } for i in range(5)]
+    by_date, sat_info = apply_saturday(by_date, monday)
 
-    next_raw = None
-    if monday <= today <= monday + datetime.timedelta(days=4):
-        next_raw = find_next_lesson(by_date, now)
+    week_days = []
+    for i in range(6):
+        d = monday + datetime.timedelta(days=i)
+        week_days.append({
+            "iso": d.isoformat(), "label": DAY_SHORT[i], "num": d.day,
+            "count": pairs_word(len(by_date.get(d, []))),
+            "selected": d == selected, "today": d == today,
+        })
 
-    # Додатковий крок: відкриваємо сторінку аудиторії кожної пари й дізнаємось викладача
+    # Блок зверху: пара, що йде зараз, і наступна пара
+    raw_now = raw_next = None
+    if monday - datetime.timedelta(days=2) <= today <= monday + datetime.timedelta(days=5):
+        raw_now, raw_next = find_hero_lessons(by_date, now)
+
+    # Додатковий крок: відкриваємо сторінку аудиторії й дізнаємось викладача
     selected_cards = by_date.get(selected, [])
     urls = {c["va_url"] for c in selected_cards if c.get("va_url")}
-    if next_raw and next_raw.get("va_url"):
-        urls.add(next_raw["va_url"])
+    for raw in (raw_now, raw_next):
+        if raw and raw.get("va_url"):
+            urls.add(raw["va_url"])
     names = fetch_teacher_names(cookies, urls)
 
     def finish(card):
@@ -470,18 +523,28 @@ def home():
         card["teacher_raw"] = names.get(card.get("va_url"))
         return enrich(card)
 
-    next_lesson = finish(next_raw) if next_raw else None
+    hero_now = finish(raw_now) if raw_now else None
+    hero_next = finish(raw_next) if raw_next else None
 
     lessons = []
     for c in selected_cards:
         state = "upcoming"
         if selected == today:
-            st = datetime.datetime.combine(selected, datetime.datetime.strptime(c["start"], "%H:%M").time(), tzinfo=TZ)
-            en = datetime.datetime.combine(selected, datetime.datetime.strptime(c["end"], "%H:%M").time(), tzinfo=TZ)
+            st, en = _bounds(selected, c)
             state = "past" if en <= now else ("current" if st <= now else "upcoming")
         elif selected < today:
             state = "past"
         lessons.append({**finish(c), "state": state})
+
+    day_summary = ""
+    if lessons:
+        day_summary = f"{pairs_word(len(lessons))}, {lessons[0]['start']} – {lessons[-1]['end']}"
+
+    sat_note = ""
+    if selected.weekday() == 5 and sat_info:
+        sat_note = f"Субота за {DAY_ACC[sat_info['weekday']]}."
+        if not sat_info["from_site"]:
+            sat_note += " Пари взято з цього дня тижня, час за суботнім дзвінком."
 
     year_part = f" {selected.year}" if selected.year != today.year else ""
     return render_template_string(
@@ -489,11 +552,14 @@ def home():
         lessons=lessons,
         week_days=week_days,
         day_title=f"{DAY_NAMES[selected.weekday()]}, {selected.day} {MONTHS[selected.month - 1]}{year_part}",
+        day_summary=day_summary,
+        sat_note=sat_note,
         is_today=selected == today,
-        prev_date=step_weekday(selected, -1).isoformat(),
-        next_date=step_weekday(selected, 1).isoformat(),
+        prev_date=step_day(selected, -1).isoformat(),
+        next_date=step_day(selected, 1).isoformat(),
         today_iso=today.isoformat(),
-        next_lesson=next_lesson,
+        hero_now=hero_now,
+        hero_next=hero_next,
     )
 
 
@@ -579,7 +645,7 @@ body {
 .switch span { display: block; font-size: 13px; opacity: .9; line-height: 1.4; }
 
 /* ── Дні тижня ── */
-.week { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-bottom: 22px; }
+.week { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; margin-bottom: 22px; }
 .day {
   display: flex; flex-direction: column; align-items: center; gap: 1px; padding: 10px 2px 9px;
   border-radius: 16px; background: var(--card); border: 1px solid var(--card-line);
@@ -661,6 +727,25 @@ body {
 .empty .big { font-size: 34px; margin-bottom: 6px; }
 .empty a { color: var(--blue); }
 
+/* ── Верхній блок: перемикач, прогрес ── */
+.seg { display: inline-flex; background: rgba(255,255,255,.18); border-radius: 12px; padding: 3px; margin-bottom: 14px; }
+.seg-btn {
+  border: 0; background: transparent; color: #fff; font: inherit; font-size: 14px; font-weight: 600;
+  padding: 7px 14px; border-radius: 9px; cursor: pointer; opacity: .85;
+}
+.seg-btn.on { background: #fff; color: #12306e; opacity: 1; }
+.view.hidden { display: none; }
+.progress { height: 6px; border-radius: 3px; background: rgba(255,255,255,.25); margin: 0 0 16px; overflow: hidden; }
+.progress i { display: block; height: 100%; width: 0; background: #fff; border-radius: 3px; transition: width 1s linear; }
+.hero .countdown { margin-top: 4px; }
+.countdown.long { font-size: clamp(28px, 8.5vw, 40px); }
+.summary { margin: 2px 0 0; color: var(--muted); font-size: 14px; }
+.satnote {
+  margin: 0 0 14px; padding: 10px 14px; border-radius: 14px; font-size: 14px;
+  background: rgba(251,191,36,.12); border: 1px solid rgba(251,191,36,.35); color: #fde68a;
+}
+.dayhead { margin-bottom: 14px; }
+
 /* ── Вхід ── */
 .login { max-width: 420px; margin: 0 auto; padding: 48px 16px; }
 .panel { border-radius: 24px; padding: 26px 22px; background: var(--card); border: 1px solid var(--card-line); box-shadow: 0 20px 40px rgba(0,0,0,.35); }
@@ -738,34 +823,51 @@ MAIN_TEMPLATE = HEAD + """<body>
     <form method="POST" action="/logout"><button class="logout" type="submit">Вийти</button></form>
   </header>
 
-  {% if next_lesson %}
-  <section class="hero" id="nextCard" aria-label="Наступна пара"
-           data-start="{{ next_lesson.start_iso }}" data-end="{{ next_lesson.end_iso }}"
-           data-title="{{ next_lesson.lesson }}" data-zoom="{{ next_lesson.zoom_link or '' }}">
-    <span class="tag">Наступна пара</span>
-    <div class="countdown" id="countdown">00:00:00</div>
-    <div class="caption" id="nextLabel">до початку пари</div>
-    <h2>{{ next_lesson.lesson }}</h2>
-    <div class="chips">
-      <span class="chip">🗓 {{ next_lesson.when }}</span>
-      <span class="chip">⏰ {{ next_lesson.start }} – {{ next_lesson.end }}</span>
-      <span class="chip">{{ next_lesson.pair }} пара</span>
-      {% if next_lesson.teacher_short %}<span class="chip">👤 {{ next_lesson.teacher_short }}</span>{% endif %}
-      {% if next_lesson.room %}<span class="chip">🏫 ауд. {{ next_lesson.room }}</span>{% endif %}
+  {% if hero_now or hero_next %}
+  {% set both = hero_now and hero_next %}
+  {% set default_view = 'now' if hero_now else 'next' %}
+  <section class="hero" id="hero" aria-label="Поточна та наступна пара">
+    {% if both %}
+    <div class="seg" role="group" aria-label="Що показати зверху">
+      <button type="button" class="seg-btn on" data-view="now">Зараз іде</button>
+      <button type="button" class="seg-btn" data-view="next">Наступна пара</button>
     </div>
-    <div class="hero-actions">
-      {% if next_lesson.zoom_link %}
-        <a class="btn-white" href="{{ next_lesson.zoom_link }}" target="_blank" rel="noopener noreferrer">🎥 Підключитися до Zoom</a>
-      {% endif %}
-      <button type="button" class="btn-ghost" id="notifyBtn">🔔 Нагадати за 5 хв</button>
-    </div>
-    {% if next_lesson.code %}
-    <div class="hero-code">🔑 Код доступу: <b>{{ next_lesson.code }}</b> <button type="button" class="copy" data-code="{{ next_lesson.code }}">Скопіювати</button></div>
     {% endif %}
-    {% if next_lesson.zoom_link %}
+
+    {% for key, item in [('now', hero_now), ('next', hero_next)] %}
+    {% if item %}
+    <div class="view{% if key != default_view %} hidden{% endif %}" data-view="{{ key }}"
+         data-start="{{ item.start_iso }}" data-end="{{ item.end_iso }}"
+         data-title="{{ item.lesson }}" data-zoom="{{ item.zoom_link or '' }}">
+      {% if not both %}<span class="tag">{{ 'Зараз іде' if key == 'now' else 'Наступна пара' }}</span>{% endif %}
+      <div class="countdown" data-role="cd">00:00:00</div>
+      <div class="caption" data-role="cap">&nbsp;</div>
+      {% if key == 'now' %}<div class="progress"><i data-role="bar"></i></div>{% endif %}
+      <h2>{{ item.lesson }}</h2>
+      <div class="chips">
+        <span class="chip">🗓 {{ item.when }}</span>
+        <span class="chip">⏰ {{ item.start }} – {{ item.end }}</span>
+        <span class="chip">{{ item.pair }} пара</span>
+        {% if item.teacher_short %}<span class="chip">👤 {{ item.teacher_short }}</span>{% endif %}
+        {% if item.room %}<span class="chip">🏫 ауд. {{ item.room }}</span>{% endif %}
+      </div>
+      <div class="hero-actions">
+        {% if item.zoom_link %}
+          <a class="btn-white" href="{{ item.zoom_link }}" target="_blank" rel="noopener noreferrer">🎥 Підключитися до Zoom</a>
+        {% endif %}
+        {% if key == 'next' %}<button type="button" class="btn-ghost notify">🔔 Нагадати за 5 хв</button>{% endif %}
+      </div>
+      {% if item.code %}
+      <div class="hero-code">🔑 Код доступу: <b>{{ item.code }}</b> <button type="button" class="copy" data-code="{{ item.code }}">Скопіювати</button></div>
+      {% endif %}
+    </div>
+    {% endif %}
+    {% endfor %}
+
+    {% if hero_next and hero_next.zoom_link %}
     <label class="switch">
       <input type="checkbox" id="autoJoin">
-      <div><b>Автопідключення</b><span>Zoom відкриється сам за хвилину до початку. Вкладка з сайтом має бути відкрита.</span></div>
+      <div><b>Автопідключення</b><span>Zoom наступної пари відкриється сам за хвилину до початку. Вкладка з сайтом має бути відкрита.</span></div>
     </label>
     {% endif %}
   </section>
@@ -782,13 +884,18 @@ MAIN_TEMPLATE = HEAD + """<body>
   </nav>
 
   <div class="dayhead">
-    <h2>{{ day_title }}{% if is_today %}<span class="badge-today">Сьогодні</span>{% endif %}</h2>
+    <div>
+      <h2>{{ day_title }}{% if is_today %}<span class="badge-today">Сьогодні</span>{% endif %}</h2>
+      {% if day_summary %}<p class="summary">{{ day_summary }}</p>{% endif %}
+    </div>
     <div class="steps">
       {% if not is_today %}<a class="jump" href="/?date={{ today_iso }}">Сьогодні</a>{% endif %}
-      <a class="step" href="/?date={{ prev_date }}" aria-label="Попередній день">‹</a>
-      <a class="step" href="/?date={{ next_date }}" aria-label="Наступний день">›</a>
+      <a class="step" id="prevDay" href="/?date={{ prev_date }}" aria-label="Попередній день">‹</a>
+      <a class="step" id="nextDay" href="/?date={{ next_date }}" aria-label="Наступний день">›</a>
     </div>
   </div>
+
+  {% if sat_note %}<div class="satnote">📌 {{ sat_note }}</div>{% endif %}
 
   {% if lessons %}
   <ol class="lessons">
@@ -824,6 +931,7 @@ MAIN_TEMPLATE = HEAD + """<body>
 </div>
 
 <script>
+/* Кнопка «Скопіювати» біля кодів доступу */
 (function () {
   document.addEventListener('click', function (e) {
     var b = e.target.closest ? e.target.closest('.copy') : null;
@@ -839,18 +947,41 @@ MAIN_TEMPLATE = HEAD + """<body>
     }
   });
 })();
+
+/* Стрілки ← → перемикають дні */
+document.addEventListener('keydown', function (e) {
+  if (e.altKey || e.ctrlKey || e.metaKey) return;
+  if (e.target && /INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
+  var id = e.key === 'ArrowLeft' ? 'prevDay' : (e.key === 'ArrowRight' ? 'nextDay' : null);
+  var a = id && document.getElementById(id);
+  if (a) a.click();
+});
+
+/* Верхній блок: відлік, перемикач, автооновлення, автопідключення */
 (function () {
-  var card = document.getElementById('nextCard');
-  if (!card) return;
-  var start = new Date(card.dataset.start), end = new Date(card.dataset.end);
-  var cd = document.getElementById('countdown'), label = document.getElementById('nextLabel');
-  var zoom = card.dataset.zoom;
-  var auto = document.getElementById('autoJoin');
-  var doneKey = 'autojoin_done_' + card.dataset.start;
-  var openedBeforeStart = new Date() < start;
+  var loadedAt = Date.now(), loadedDay = new Date().toDateString(), baseTitle = document.title;
+
   function store(k, v) {
     try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; }
   }
+  // Автооновлення сторінки (не частіше 3 разів за 2 хв, щоб не зациклитись при неточному годиннику)
+  function refresh() {
+    try {
+      var now = Date.now();
+      var arr = JSON.parse(sessionStorage.getItem('reloads') || '[]').filter(function (t) { return now - t < 120000; });
+      if (arr.length >= 3) return;
+      arr.push(now);
+      sessionStorage.setItem('reloads', JSON.stringify(arr));
+    } catch (e) {}
+    location.reload();
+  }
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden && Date.now() - loadedAt > 60000) refresh();
+  });
+
+  var hero = document.getElementById('hero');
+  if (!hero) return;
+
   function pad(n) { return n < 10 ? '0' + n : '' + n; }
   function fmt(ms) {
     var s = Math.max(0, Math.floor(ms / 1000));
@@ -859,43 +990,102 @@ MAIN_TEMPLATE = HEAD + """<body>
     var m = Math.floor(s / 60); s -= m * 60;
     return (d ? d + ' д ' : '') + pad(h) + ':' + pad(m) + ':' + pad(s);
   }
+  function human(ms) {
+    var m = Math.max(0, Math.ceil(ms / 60000));
+    if (m < 1) return 'менше хвилини';
+    var d = Math.floor(m / 1440), h = Math.floor((m % 1440) / 60), mm = m % 60, out = [];
+    if (d) out.push(d + ' д');
+    if (h) out.push(h + ' год');
+    if (mm && !d) out.push(mm + ' хв');
+    return out.join(' ');
+  }
+
+  var panels = {}, active = null;
+  [].forEach.call(hero.querySelectorAll('.view'), function (p) {
+    panels[p.dataset.view] = {
+      el: p, start: new Date(p.dataset.start), end: new Date(p.dataset.end),
+      title: p.dataset.title, zoom: p.dataset.zoom,
+      cd: p.querySelector('[data-role=cd]'), cap: p.querySelector('[data-role=cap]'),
+      bar: p.querySelector('[data-role=bar]')
+    };
+    if (!p.classList.contains('hidden')) active = p.dataset.view;
+  });
+
+  // Перемикач «Зараз іде» / «Наступна пара»
+  [].forEach.call(hero.querySelectorAll('.seg-btn'), function (btn) {
+    btn.addEventListener('click', function () {
+      active = btn.dataset.view;
+      [].forEach.call(hero.querySelectorAll('.seg-btn'), function (b) { b.classList.toggle('on', b === btn); });
+      for (var k in panels) panels[k].el.classList.toggle('hidden', k !== active);
+      tick();
+    });
+  });
+
+  // Автопідключення до Zoom наступної пари
+  var auto = document.getElementById('autoJoin');
+  var nextP = panels.next, nowP = panels.now;
+  var doneKey = nextP ? 'autojoin_done_' + nextP.el.dataset.start : '';
+  var openedBeforeStart = nextP ? new Date() < nextP.start : false;
   if (auto) {
     auto.checked = store('autojoin') === '1';
     auto.addEventListener('change', function () { store('autojoin', auto.checked ? '1' : '0'); });
   }
+
+  // Нагадування за 5 хвилин
+  var notify = hero.querySelector('.notify');
+  if (notify && nextP) {
+    notify.addEventListener('click', function () {
+      if (!('Notification' in window)) { notify.textContent = 'Браузер не підтримує сповіщень'; return; }
+      Notification.requestPermission().then(function (perm) {
+        if (perm !== 'granted') { notify.textContent = 'Сповіщення заборонені'; return; }
+        var wait = nextP.start - new Date() - 5 * 60 * 1000;
+        if (wait <= 0) { notify.textContent = 'Пара вже скоро почнеться'; return; }
+        setTimeout(function () { new Notification('Пара через 5 хвилин', { body: nextP.title }); }, wait);
+        notify.textContent = '✅ Нагадаю (не закривайте вкладку)';
+        notify.disabled = true;
+      });
+    });
+  }
+
   function tick() {
     var now = new Date();
-    if (auto && auto.checked && zoom && openedBeforeStart && !store(doneKey) &&
-        now >= new Date(start.getTime() - 60 * 1000) && now < end) {
-      store(doneKey, '1');
-      window.location.href = zoom;
-      return;
-    }
-    if (now >= end) { label.textContent = 'пара завершилась, оновіть сторінку'; cd.textContent = '00:00:00'; return; }
-    if (now >= start) { label.textContent = 'до кінця пари'; cd.textContent = fmt(end - now); return; }
-    label.textContent = 'до початку пари';
-    cd.textContent = fmt(start - now);
-  }
-  tick(); setInterval(tick, 1000);
+    if (new Date().toDateString() !== loadedDay) { refresh(); return; }
 
-  var btn = document.getElementById('notifyBtn');
-  btn.addEventListener('click', function () {
-    if (!('Notification' in window)) { btn.textContent = 'Браузер не підтримує сповіщень'; return; }
-    Notification.requestPermission().then(function (perm) {
-      if (perm !== 'granted') { btn.textContent = 'Сповіщення заборонені'; return; }
-      var wait = start - new Date() - 5 * 60 * 1000;
-      if (wait <= 0) { btn.textContent = 'Пара вже скоро почнеться'; return; }
-      setTimeout(function () { new Notification('Пара через 5 хвилин', { body: card.dataset.title }); }, wait);
-      btn.textContent = '✅ Нагадаю (не закривайте вкладку)';
-      btn.disabled = true;
-    });
-  });
+    if (nowP) {
+      var left = nowP.end - now;
+      if (left < -2000) { refresh(); return; }               // пара закінчилась: оновлюємо сторінку
+      nowP.cd.textContent = fmt(left);
+      nowP.cd.classList.toggle('long', nowP.cd.textContent.length > 9);
+      nowP.cap.textContent = 'до кінця пари: ' + human(left);
+      if (nowP.bar) nowP.bar.style.width = Math.min(100, Math.max(0, (now - nowP.start) / (nowP.end - nowP.start) * 100)) + '%';
+    }
+    if (nextP) {
+      var wait = nextP.start - now;
+      if (wait < -2000) { refresh(); return; }               // наступна пара почалась: оновлюємо сторінку
+      nextP.cd.textContent = fmt(wait);
+      nextP.cd.classList.toggle('long', nextP.cd.textContent.length > 9);
+      nextP.cap.textContent = 'до наступної пари: ' + human(wait);
+      if (auto && auto.checked && nextP.zoom && openedBeforeStart && !store(doneKey) &&
+          now >= new Date(nextP.start.getTime() - 60 * 1000) && now < nextP.end) {
+        store(doneKey, '1');
+        window.location.href = nextP.zoom;
+        return;
+      }
+    }
+    // Заголовок вкладки з відліком, щоб було видно, навіть коли вкладка у фоні
+    var cur = panels[active];
+    if (cur) {
+      var ms = (active === 'now' ? cur.end : cur.start) - now;
+      document.title = human(ms) + ' · ' + cur.title;
+    }
+  }
+  tick();
+  setInterval(tick, 1000);
 })();
 </script>
 </body>
 </html>
 """
-
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG") == "1", port=5000)

@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import time
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urljoin, urlparse
@@ -13,6 +14,7 @@ import requests
 from bs4 import BeautifulSoup
 from cryptography.fernet import Fernet, InvalidToken
 from flask import Flask, make_response, redirect, render_template_string, request
+from itsdangerous import BadSignature, URLSafeTimedSerializer
 
 from teachers import ASSIGNMENTS, TEACHERS
 
@@ -26,9 +28,11 @@ CACHE_SECONDS = 120
 # SECRET_KEY потрібен для шифрування cookie. На Vercel задай його в Environment Variables.
 SECRET_KEY = os.getenv("SECRET_KEY")
 if not SECRET_KEY:
-    SECRET_KEY = os.urandom(32).hex()
-    print("⚠️ SECRET_KEY не задано: сесії діятимуть лише до перезапуску сервера.")
+    raise RuntimeError("Задайте SECRET_KEY як випадковий рядок щонайменше з 32 символів.")
+if len(SECRET_KEY) < 32:
+    raise RuntimeError("SECRET_KEY має містити щонайменше 32 символи.")
 fernet = Fernet(base64.urlsafe_b64encode(hashlib.sha256(SECRET_KEY.encode()).digest()))
+csrf_serializer = URLSafeTimedSerializer(SECRET_KEY, salt="csrf-token")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
@@ -331,6 +335,20 @@ def clear_session(resp):
     resp.delete_cookie(COOKIE_NAME)
 
 
+def make_csrf_token():
+    return csrf_serializer.dumps(secrets.token_urlsafe(32))
+
+
+def valid_csrf_token(token):
+    if not token:
+        return False
+    try:
+        csrf_serializer.loads(token, max_age=3600)
+        return True
+    except BadSignature:
+        return False
+
+
 # Обмеження НЕВДАЛИХ спроб входу (в межах одного інстанса сервера).
 # Вдалі входи не рахуються, щоб клас в одній мережі не блокував сам себе.
 _FAILED = {}
@@ -338,7 +356,7 @@ MAX_FAILED = 20
 
 
 def _client_ip():
-    return (request.headers.get("X-Forwarded-For", request.remote_addr or "?")).split(",")[0].strip()
+    return request.remote_addr or "?"
 
 
 def is_blocked():
@@ -445,17 +463,23 @@ def find_hero_lessons(by_date, now):
 # ───────────────────────── Сторінки ─────────────────────────
 @app.route("/login", methods=["POST"])
 def login():
+    if not valid_csrf_token(request.form.get("csrf_token")):
+        return render_template_string(
+            LOGIN_TEMPLATE, error="Форма застаріла. Оновіть сторінку.", csrf_token=make_csrf_token()), 400
     if is_blocked():
-        return render_template_string(LOGIN_TEMPLATE, error="Забагато спроб. Спробуйте за 10 хвилин."), 429
+        return render_template_string(
+            LOGIN_TEMPLATE, error="Забагато спроб. Спробуйте за 10 хвилин.",
+            csrf_token=make_csrf_token()), 429
     login_value = (request.form.get("login") or "").strip()
     password = request.form.get("password") or ""
-    if not login_value or not password:
-        return render_template_string(LOGIN_TEMPLATE, error="Введіть логін і пароль."), 400
+    if not login_value or not password or len(login_value) > 200 or len(password) > 100:
+        return render_template_string(
+            LOGIN_TEMPLATE, error="Перевірте логін і пароль.", csrf_token=make_csrf_token()), 400
     ok, msg, cookies = lcloud_login(login_value, password)
     password = None  # пароль більше не потрібен
     if not ok:
         record_failure()
-        return render_template_string(LOGIN_TEMPLATE, error=msg), 401
+        return render_template_string(LOGIN_TEMPLATE, error=msg, csrf_token=make_csrf_token()), 401
     resp = make_response(redirect("/"))
     set_session(resp, cookies)
     return resp
@@ -463,6 +487,8 @@ def login():
 
 @app.route("/logout", methods=["POST"])
 def logout():
+    if not valid_csrf_token(request.form.get("csrf_token")):
+        return "Форма застаріла. Оновіть сторінку.", 400
     resp = make_response(redirect("/"))
     clear_session(resp)
     return resp
@@ -472,7 +498,7 @@ def logout():
 def home():
     cookies = read_session()
     if not cookies:
-        return render_template_string(LOGIN_TEMPLATE, error=None)
+        return render_template_string(LOGIN_TEMPLATE, error=None, csrf_token=make_csrf_token())
 
     now = datetime.datetime.now(TZ)
     today = now.date()
@@ -486,7 +512,8 @@ def home():
         by_date = get_schedule(cookies, monday, extra_day=selected)
     except SessionExpired:
         resp = make_response(render_template_string(
-            LOGIN_TEMPLATE, error="Сесія завершилась. Увійдіть ще раз."))
+            LOGIN_TEMPLATE, error="Сесія завершилась. Увійдіть ще раз.",
+            csrf_token=make_csrf_token()))
         clear_session(resp)
         return resp
     except Exception as exc:
@@ -560,212 +587,218 @@ def home():
         today_iso=today.isoformat(),
         hero_now=hero_now,
         hero_next=hero_next,
+        csrf_token=make_csrf_token(),
     )
 
 
 STYLE = """
 :root {
-  --bg: #0b0f1a; --card: rgba(255,255,255,.045); --card-line: rgba(255,255,255,.09);
-  --text: #f1f4fa; --muted: #98a2b8;
-  --blue: #4f8cff; --blue-2: #2b5cff; --green: #34d399; --amber: #fbbf24; --red: #f87171;
+  color-scheme: light;
+  --bg: #f4f3ef; --card: #fff; --card-line: #e4e2dc;
+  --text: #282b27; --muted: #73766f;
+  --blue: #315d4b; --blue-2: #254a3b; --green: #34745a; --amber: #a56d29; --red: #a54539;
 }
 * { box-sizing: border-box; }
-html { color-scheme: dark; }
 body {
   margin: 0; color: var(--text); min-height: 100vh;
-  font-family: "Onest", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  font-size: 16px; line-height: 1.5; -webkit-font-smoothing: antialiased;
-  background:
-    radial-gradient(900px 500px at 8% -8%, rgba(60, 100, 220, .28), transparent 60%),
-    radial-gradient(700px 420px at 100% 0%, rgba(20, 184, 166, .18), transparent 55%),
-    var(--bg);
-  background-attachment: fixed;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 16px; line-height: 1.55; -webkit-font-smoothing: antialiased;
+  background: var(--bg);
 }
 :focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 8px; }
-.wrap { max-width: 680px; margin: 0 auto; padding: 22px 16px 64px; }
+.wrap { max-width: 760px; margin: 0 auto; padding: 28px 20px 64px; }
 
-.topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
+.topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; padding-bottom: 16px; border-bottom: 1px solid var(--card-line); }
 .title {
-  margin: 0; font-size: 24px; font-weight: 800; letter-spacing: -.02em;
-  background: linear-gradient(90deg, #8ab8ff, #7ff0c8); -webkit-background-clip: text;
-  background-clip: text; color: transparent;
+  margin: 0; color: var(--text); font-size: 22px; font-weight: 700; letter-spacing: -.03em;
 }
 .logout {
-  background: var(--card); border: 1px solid var(--card-line); color: var(--muted);
-  padding: 8px 14px; border-radius: 12px; font: inherit; font-size: 14px; cursor: pointer;
+  background: transparent; border: 1px solid var(--card-line); color: var(--muted);
+  padding: 7px 13px; border-radius: 7px; font: inherit; font-size: 14px; cursor: pointer;
 }
-.logout:hover { color: var(--text); border-color: rgba(255,255,255,.25); }
+.logout:hover { color: var(--text); border-color: #b8b8b0; }
 
 /* ── Наступна пара ── */
 .hero {
-  border-radius: 24px; padding: 22px; margin-bottom: 22px; color: #fff;
-  background: linear-gradient(135deg, #2b5cff 0%, #1f8fd1 55%, #14b8a6 100%);
-  box-shadow: 0 18px 40px rgba(20, 60, 160, .35);
+  border-radius: 10px; padding: 24px; margin-bottom: 24px; color: var(--text);
+  background: #e8eee8; border: 1px solid #d5dfd6;
 }
 .hero .tag {
-  display: inline-block; font-size: 13px; font-weight: 600; padding: 4px 12px; border-radius: 999px;
-  background: rgba(255,255,255,.2);
+  display: inline-block; color: var(--muted); font-size: 12px; font-weight: 700;
+  letter-spacing: .06em; text-transform: uppercase;
 }
 .countdown {
-  font-size: clamp(42px, 13vw, 60px); font-weight: 800; line-height: 1.05; letter-spacing: -.02em;
+  color: #244a39; font-size: clamp(42px, 11vw, 58px); font-weight: 700; line-height: 1.1; letter-spacing: -.04em;
   font-variant-numeric: tabular-nums; margin: 14px 0 0;
 }
-.hero .caption { font-size: 14px; opacity: .9; margin-bottom: 16px; }
-.hero h2 { margin: 0 0 10px; font-size: 21px; font-weight: 700; line-height: 1.3; }
+.hero .caption { color: var(--muted); font-size: 14px; margin-bottom: 16px; }
+.hero h2 { margin: 0 0 10px; font-size: 20px; font-weight: 650; line-height: 1.35; }
 .hero .chips { display: flex; flex-wrap: wrap; gap: 8px; }
-.hero .chip { background: rgba(255,255,255,.18); color: #fff; }
+.hero .chip { background: transparent; color: #4f5b52; padding: 0; }
 .hero-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
 .btn-white {
-  background: #fff; color: #12306e; border: 0; border-radius: 14px; padding: 12px 18px;
-  font: inherit; font-size: 15px; font-weight: 700; text-decoration: none; cursor: pointer;
+  background: #315d4b; color: #fff; border: 0; border-radius: 7px; padding: 10px 15px;
+  font: inherit; font-size: 14px; font-weight: 650; text-decoration: none; cursor: pointer;
 }
-.btn-white:hover { background: #eef4ff; }
+.btn-white:hover { background: #254a3b; }
 .btn-ghost {
-  background: rgba(255,255,255,.14); color: #fff; border: 1px solid rgba(255,255,255,.4);
-  border-radius: 14px; padding: 12px 18px; font: inherit; font-size: 15px; cursor: pointer;
+  background: transparent; color: #315d4b; border: 1px solid #bac9bd;
+  border-radius: 7px; padding: 9px 14px; font: inherit; font-size: 14px; cursor: pointer;
 }
-.btn-ghost:hover { background: rgba(255,255,255,.22); }
+.btn-ghost:hover { background: rgba(49,93,75,.07); }
 .btn-ghost:disabled { opacity: .75; cursor: default; }
 .switch {
   display: flex; gap: 12px; align-items: flex-start; margin-top: 18px; padding-top: 16px;
-  border-top: 1px solid rgba(255,255,255,.28); cursor: pointer;
+  border-top: 1px solid #d5dfd6; cursor: pointer;
 }
 .switch input {
   -webkit-appearance: none; appearance: none; flex: 0 0 auto; width: 46px; height: 28px; margin: 1px 0 0;
-  border-radius: 14px; background: rgba(255,255,255,.3); position: relative; cursor: pointer;
+  border-radius: 14px; background: #c3c9c3; position: relative; cursor: pointer;
   transition: background .2s;
 }
 .switch input::after {
   content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px;
-  border-radius: 50%; background: #fff; transition: transform .2s;
+  border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.2); transition: transform .2s;
 }
-.switch input:checked { background: #10b981; }
+.switch input:checked { background: #34745a; }
 .switch input:checked::after { transform: translateX(18px); }
-.switch b { display: block; font-weight: 700; font-size: 15px; }
-.switch span { display: block; font-size: 13px; opacity: .9; line-height: 1.4; }
+.switch b { display: block; font-weight: 650; font-size: 14px; }
+.switch span { display: block; color: var(--muted); font-size: 13px; line-height: 1.45; }
 
 /* ── Дні тижня ── */
-.week { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; margin-bottom: 22px; }
+.week { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; margin-bottom: 28px; }
 .day {
-  display: flex; flex-direction: column; align-items: center; gap: 1px; padding: 10px 2px 9px;
-  border-radius: 16px; background: var(--card); border: 1px solid var(--card-line);
+  display: flex; flex-direction: column; align-items: center; gap: 1px; padding: 9px 2px;
+  border-radius: 7px; background: transparent; border: 1px solid transparent;
   color: var(--text); text-decoration: none; transition: background .15s, border-color .15s;
 }
-.day:hover { background: rgba(255,255,255,.08); }
-.day .wd { font-size: 13px; color: var(--muted); }
-.day .dn { font-size: 21px; font-weight: 800; line-height: 1.25; font-variant-numeric: tabular-nums; }
-.day .cnt { font-size: 11.5px; color: var(--muted); white-space: nowrap; }
-.day.today { border-color: rgba(251, 191, 36, .65); }
-.day.today .wd { color: var(--amber); }
-.day.sel { background: linear-gradient(160deg, #3b6dff, #2b5cff); border-color: transparent; box-shadow: 0 8px 20px rgba(43, 92, 255, .4); }
-.day.sel .wd, .day.sel .cnt { color: rgba(255,255,255,.85); }
+.day:hover { background: #ebe9e3; }
+.day .wd { color: var(--muted); font-size: 12px; }
+.day .dn { font-size: 20px; font-weight: 650; line-height: 1.35; font-variant-numeric: tabular-nums; }
+.day .cnt { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.day.today:not(.sel) { border-color: #c9b991; }
+.day.today:not(.sel) .wd { color: var(--amber); }
+.day.sel { background: #315d4b; border-color: #315d4b; color: #fff; }
+.day.sel .wd, .day.sel .cnt { color: rgba(255,255,255,.8); }
 
-/* ── Заголовок дня ── */
 .dayhead { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
-.dayhead h2 { margin: 0; font-size: 19px; font-weight: 800; line-height: 1.3; }
+.dayhead h2 { margin: 0; font-size: 19px; font-weight: 650; line-height: 1.35; }
 .badge-today {
-  display: inline-block; margin-left: 8px; white-space: nowrap; padding: 3px 10px; border-radius: 999px; vertical-align: 2px;
-  font-size: 12.5px; font-weight: 700; color: var(--green); background: rgba(52, 211, 153, .15);
+  display: inline-block; margin-left: 8px; white-space: nowrap; padding: 2px 8px; border-radius: 5px; vertical-align: 2px;
+  font-size: 12px; font-weight: 650; color: #315d4b; background: #e5eee7;
 }
 .steps { display: flex; gap: 8px; align-items: center; }
 .step {
-  width: 40px; height: 40px; display: grid; place-items: center; border-radius: 12px;
+  width: 38px; height: 38px; display: grid; place-items: center; border-radius: 7px;
   background: var(--card); border: 1px solid var(--card-line); color: var(--text);
-  text-decoration: none; font-size: 18px;
+  text-decoration: none; font-size: 19px;
 }
-.step:hover { background: rgba(255,255,255,.09); }
+.step:hover { background: #f0efe9; }
 .jump { font-size: 14px; color: var(--blue); text-decoration: none; padding: 0 4px; }
 .jump:hover { text-decoration: underline; }
 
-/* ── Пари ── */
 .lessons { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
 .lesson {
-  display: grid; grid-template-columns: 58px 1fr; gap: 14px; padding: 16px; border-radius: 20px;
+  display: grid; grid-template-columns: 50px 1fr; gap: 14px; padding: 16px; border-radius: 8px;
   background: var(--card); border: 1px solid var(--card-line);
 }
-.lesson.past { opacity: .55; }
-.lesson.current { border-color: rgba(52, 211, 153, .6); box-shadow: 0 0 0 3px rgba(52, 211, 153, .12); }
+.lesson.past { opacity: .62; }
+.lesson.current { border-left: 3px solid #34745a; }
 .num {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
-  height: 58px; border-radius: 16px; background: rgba(79, 140, 255, .16); color: #a9c7ff;
+  height: 50px; border-radius: 7px; background: #f1f0eb; color: #315d4b;
 }
-.num b { font-size: 24px; font-weight: 800; line-height: 1; }
-.num small { font-size: 11.5px; margin-top: 2px; }
-.lesson.current .num { background: rgba(52, 211, 153, .18); color: var(--green); }
-.name { font-size: 18px; font-weight: 700; line-height: 1.3; }
-.status { display: inline-block; font-size: 12.5px; font-weight: 700; padding: 2px 10px; border-radius: 999px; margin-bottom: 6px; }
-.status.live { color: var(--green); background: rgba(52, 211, 153, .15); }
-.status.done { color: var(--muted); background: rgba(255,255,255,.07); }
-.chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
-.chip { font-size: 14px; padding: 4px 10px; border-radius: 10px; background: rgba(255,255,255,.07); color: #d5dbe8; }
-.group { font-size: 13.5px; color: var(--muted); margin-top: 8px; }
+.num b { font-size: 22px; font-weight: 700; line-height: 1; }
+.num small { font-size: 11px; margin-top: 2px; }
+.lesson.current .num { background: #e5eee7; color: #315d4b; }
+.name { font-size: 16px; font-weight: 650; line-height: 1.4; }
+.status { display: inline-block; font-size: 12px; font-weight: 650; padding: 2px 8px; border-radius: 5px; margin-bottom: 5px; }
+.status.live { color: #315d4b; background: #e5eee7; }
+.status.done { color: var(--muted); background: #f0efe9; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 7px; }
+.chip { font-size: 13px; padding: 2px 0; color: #585d56; }
+.group { font-size: 13px; color: var(--muted); margin-top: 7px; }
 .zoom, .nolink { grid-column: 1 / -1; text-align: center; }
 .zoom {
-  display: block; padding: 12px; border-radius: 14px; font-size: 15px; font-weight: 700;
-  color: #fff; text-decoration: none; background: linear-gradient(135deg, #3b6dff, #2b8cff);
-  box-shadow: 0 6px 16px rgba(43, 92, 255, .35); transition: transform .15s, box-shadow .15s;
+  display: block; padding: 10px 14px; border-radius: 7px; font-size: 14px; font-weight: 650;
+  color: #315d4b; text-decoration: none; background: #edf2ed; border: 1px solid #d5dfd6;
+  transition: background .15s, border-color .15s;
 }
-.zoom:hover { transform: translateY(-1px); box-shadow: 0 10px 22px rgba(43, 92, 255, .5); }
-.nolink { font-size: 13px; color: var(--muted); }
-.teacher { font-size: 14.5px; font-weight: 600; color: #d5dbe8; margin-top: 8px; }
-.code { font-size: 14px; margin-top: 8px; color: #d5dbe8; }
+.zoom:hover { background: #e1ebe2; border-color: #bdcfc0; }
+.nolink { color: var(--muted); font-size: 13px; }
+.teacher { color: #4c534c; font-size: 14px; font-weight: 550; margin-top: 7px; }
+.code { color: #4c534c; font-size: 14px; margin-top: 7px; }
 .code b, .hero-code b, .mono { font-family: ui-monospace, Menlo, Consolas, monospace; letter-spacing: .03em; }
-.hero-code { margin-top: 16px; font-size: 14.5px; }
+.hero-code { margin-top: 16px; font-size: 14px; }
 .copy {
-  margin-left: 6px; padding: 3px 10px; border-radius: 8px; font: inherit; font-size: 13px; cursor: pointer;
-  color: var(--text); background: rgba(255,255,255,.08); border: 1px solid var(--card-line);
+  margin-left: 5px; padding: 2px 8px; border-radius: 5px; font: inherit; font-size: 12px; cursor: pointer;
+  color: #315d4b; background: transparent; border: 1px solid #bdcfc0;
 }
-.copy:hover { background: rgba(255,255,255,.16); }
-.hero .copy { color: #fff; background: rgba(255,255,255,.16); border-color: rgba(255,255,255,.45); }
+.copy:hover { background: #edf2ed; }
+.hero .copy { color: #315d4b; background: transparent; border-color: #bdcfc0; }
 .alt { color: var(--blue); }
-@media (min-width: 560px) {
-  .lesson { grid-template-columns: 58px 1fr auto; align-items: center; }
+@media (min-width: 640px) {
+  .lesson { grid-template-columns: 50px 1fr auto; align-items: center; }
   .zoom, .nolink { grid-column: auto; }
-  .zoom { padding: 11px 18px; white-space: nowrap; }
+  .zoom { padding: 9px 13px; white-space: nowrap; }
 }
-.empty { text-align: center; padding: 36px 20px; border-radius: 20px; background: var(--card); border: 1px solid var(--card-line); color: var(--muted); }
-.empty .big { font-size: 34px; margin-bottom: 6px; }
+.empty { text-align: center; padding: 32px 20px; border-radius: 8px; background: var(--card); border: 1px solid var(--card-line); color: var(--muted); }
+.empty .big { color: var(--text); font-size: 18px; font-weight: 650; margin-bottom: 4px; }
 .empty a { color: var(--blue); }
 
 /* ── Верхній блок: перемикач, прогрес ── */
-.seg { display: inline-flex; background: rgba(255,255,255,.18); border-radius: 12px; padding: 3px; margin-bottom: 14px; }
+.seg { display: inline-flex; background: #dce5dc; border-radius: 6px; padding: 3px; margin-bottom: 14px; }
 .seg-btn {
-  border: 0; background: transparent; color: #fff; font: inherit; font-size: 14px; font-weight: 600;
-  padding: 7px 14px; border-radius: 9px; cursor: pointer; opacity: .85;
+  border: 0; background: transparent; color: #4f5b52; font: inherit; font-size: 13px; font-weight: 600;
+  padding: 6px 11px; border-radius: 4px; cursor: pointer;
 }
-.seg-btn.on { background: #fff; color: #12306e; opacity: 1; }
+.seg-btn.on { background: #fff; color: #244a39; }
 .view.hidden { display: none; }
-.progress { height: 6px; border-radius: 3px; background: rgba(255,255,255,.25); margin: 0 0 16px; overflow: hidden; }
-.progress i { display: block; height: 100%; width: 0; background: #fff; border-radius: 3px; transition: width 1s linear; }
+.progress { height: 4px; border-radius: 2px; background: #d1dbd2; margin: 0 0 16px; overflow: hidden; }
+.progress i { display: block; height: 100%; width: 0; background: #34745a; border-radius: 2px; transition: width 1s linear; }
 .hero .countdown { margin-top: 4px; }
 .countdown.long { font-size: clamp(28px, 8.5vw, 40px); }
 .summary { margin: 2px 0 0; color: var(--muted); font-size: 14px; }
 .satnote {
-  margin: 0 0 14px; padding: 10px 14px; border-radius: 14px; font-size: 14px;
-  background: rgba(251,191,36,.12); border: 1px solid rgba(251,191,36,.35); color: #fde68a;
+  margin: 0 0 14px; padding: 10px 13px; border-radius: 7px; font-size: 13px;
+  background: #f3eee3; border: 1px solid #e6dcc5; color: #735a30;
 }
 .dayhead { margin-bottom: 14px; }
 
 /* ── Вхід ── */
-.login { max-width: 420px; margin: 0 auto; padding: 48px 16px; }
-.panel { border-radius: 24px; padding: 26px 22px; background: var(--card); border: 1px solid var(--card-line); box-shadow: 0 20px 40px rgba(0,0,0,.35); }
-.logo { font-size: 40px; line-height: 1; margin-bottom: 10px; }
-.panel h1 { margin: 0 0 6px; font-size: 26px; font-weight: 800; letter-spacing: -.02em; }
-.lead { color: var(--muted); margin: 0 0 22px; font-size: 15px; }
-.f { display: block; font-size: 14px; font-weight: 600; margin: 0 0 6px; }
+.login { max-width: 440px; margin: 0 auto; padding: 56px 16px; }
+.panel { border-radius: 9px; padding: 30px 28px; background: var(--card); border: 1px solid var(--card-line); }
+.logo { color: var(--blue); font-size: 11px; font-weight: 700; letter-spacing: .12em; margin-bottom: 12px; }
+.panel h1 { margin: 0 0 6px; font-size: 25px; font-weight: 700; letter-spacing: -.03em; }
+.lead { color: var(--muted); margin: 0 0 22px; font-size: 14px; }
+.f { display: block; font-size: 13px; font-weight: 600; margin: 0 0 6px; }
 .field {
-  width: 100%; padding: 13px 14px; margin-bottom: 16px; border-radius: 14px; font: inherit;
-  border: 1px solid var(--card-line); background: rgba(255,255,255,.06); color: var(--text);
+  width: 100%; padding: 11px 12px; margin-bottom: 15px; border-radius: 6px; font: inherit;
+  border: 1px solid #d8d7d0; background: #fff; color: var(--text);
 }
-.field:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px rgba(79,140,255,.25); }
+.field:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px rgba(49,93,75,.12); }
 .submit {
-  width: 100%; padding: 14px; border: 0; border-radius: 14px; color: #fff; font: inherit; font-weight: 700;
-  font-size: 16px; cursor: pointer; background: linear-gradient(135deg, #3b6dff, #2b8cff);
-  box-shadow: 0 8px 20px rgba(43, 92, 255, .4);
+  width: 100%; padding: 12px; border: 0; border-radius: 6px; color: #fff; font: inherit; font-weight: 650;
+  font-size: 14px; cursor: pointer; background: #315d4b;
 }
-.submit:hover { filter: brightness(1.08); }
-.note { display: flex; gap: 10px; margin-top: 20px; padding: 12px 14px; border-radius: 14px; font-size: 13px; line-height: 1.5; color: var(--muted); background: rgba(255,255,255,.04); }
-.err { padding: 12px 14px; margin-bottom: 18px; border-radius: 14px; font-size: 14.5px; color: #fecaca; background: rgba(248,113,113,.12); border: 1px solid rgba(248,113,113,.35); }
+.submit:hover { background: #254a3b; }
+.retry { display: block; text-align: center; text-decoration: none; }
+.note { display: flex; gap: 10px; margin-top: 18px; padding: 11px 12px; border-radius: 6px; font-size: 12px; line-height: 1.55; color: var(--muted); background: #f5f4f0; }
+.err { padding: 11px 12px; margin-bottom: 16px; border-radius: 6px; font-size: 14px; color: #853b32; background: #fbefed; border: 1px solid #edd1cc; }
+@media (max-width: 520px) {
+  .wrap { padding: 18px 14px 48px; }
+  .hero { padding: 19px 17px; }
+  .week { gap: 2px; }
+  .day .wd { font-size: 11px; }
+  .day .dn { font-size: 18px; }
+  .day .cnt { font-size: 10px; }
+  .lesson { padding: 12px; gap: 10px; }
+  .login { padding: 32px 14px; }
+  .panel { padding: 25px 20px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; }
+}
 """
 
 HEAD = """<!DOCTYPE html>
@@ -773,11 +806,8 @@ HEAD = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#0b0f1a">
+  <meta name="theme-color" content="#f4f3ef">
   <title>Мій розклад</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <style>__STYLE__</style>
 </head>
 """.replace("__STYLE__", STYLE)
@@ -785,20 +815,49 @@ HEAD = """<!DOCTYPE html>
 LOGIN_TEMPLATE = HEAD + """<body>
 <main class="login">
   <div class="panel">
-    <div class="logo">📅</div>
+    <div class="logo">МІЙ РОЗКЛАД</div>
     <h1>Мій розклад</h1>
     <p class="lead">Увійдіть своїм акаунтом lCloud, і ми покажемо розклад вашої групи.</p>
     {% if error %}<div class="err" role="alert">{{ error }}</div>{% endif %}
-    <form method="POST" action="/login">
+    <form id="login-form" method="POST" action="/login">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <label class="f" for="login">Логін або телефон</label>
       <input class="field" id="login" type="text" name="login" autocomplete="username" maxlength="200" required autofocus>
       <label class="f" for="password">Пароль</label>
       <input class="field" id="password" type="password" name="password" autocomplete="current-password" maxlength="100" required>
       <button class="submit" type="submit">Увійти</button>
     </form>
-    <div class="note"><span>🔒</span><span>Сайт неофіційний і не пов'язаний з коледжем чи lCloud. Пароль потрібен один раз, щоб увійти в lCloud, і ніде не зберігається. У браузері лишається зашифрована сесія на 12 годин, кнопка «Вийти» її видаляє.</span></div>
+    <div class="note"><span>Сайт неофіційний і не пов'язаний з коледжем чи lCloud. Пароль потрібен один раз, щоб увійти в lCloud, і ніде не зберігається. Якщо браузер автоматично заповнить обидва поля, вхід відбудеться одразу. У браузері лишається зашифрована сесія на 12 годин, кнопка «Вийти» її видаляє.</span></div>
   </div>
 </main>
+<script>
+  (function () {
+    var form = document.getElementById("login-form");
+    var login = document.getElementById("login");
+    var password = document.getElementById("password");
+    var submit = form.querySelector('button[type="submit"]');
+    var submitted = false;
+
+    function submitWhenFilled() {
+      if (submitted || !login.value.trim() || !password.value) return;
+      submitted = true;
+      submit.disabled = true;
+      submit.textContent = "Входимо…";
+      form.requestSubmit();
+    }
+
+    form.addEventListener("input", submitWhenFilled);
+    form.addEventListener("change", submitWhenFilled);
+    var autofillCheck = window.setInterval(function () {
+      if (submitted) {
+        window.clearInterval(autofillCheck);
+        return;
+      }
+      submitWhenFilled();
+    }, 250);
+    window.setTimeout(function () { window.clearInterval(autofillCheck); }, 10000);
+  })();
+</script>
 </body>
 </html>
 """
@@ -808,7 +867,7 @@ ERROR_TEMPLATE = HEAD + """<body>
   <div class="panel">
     <h1>Не вдалося завантажити</h1>
     <div class="err" role="alert">{{ message }}</div>
-    <a class="submit" style="display:block; text-align:center; text-decoration:none" href="/">Спробувати ще раз</a>
+    <a class="submit retry" href="/">Спробувати ще раз</a>
   </div>
 </main>
 </body>
@@ -819,8 +878,11 @@ MAIN_TEMPLATE = HEAD + """<body>
 <div class="wrap">
 
   <header class="topbar">
-    <h1 class="title">📅 Мій розклад</h1>
-    <form method="POST" action="/logout"><button class="logout" type="submit">Вийти</button></form>
+    <h1 class="title">Мій розклад</h1>
+    <form method="POST" action="/logout">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="logout" type="submit">Вийти</button>
+    </form>
   </header>
 
   {% if hero_now or hero_next %}
@@ -845,20 +907,20 @@ MAIN_TEMPLATE = HEAD + """<body>
       {% if key == 'now' %}<div class="progress"><i data-role="bar"></i></div>{% endif %}
       <h2>{{ item.lesson }}</h2>
       <div class="chips">
-        <span class="chip">🗓 {{ item.when }}</span>
-        <span class="chip">⏰ {{ item.start }} – {{ item.end }}</span>
+        <span class="chip">{{ item.when }}</span>
+        <span class="chip">{{ item.start }} – {{ item.end }}</span>
         <span class="chip">{{ item.pair }} пара</span>
-        {% if item.teacher_short %}<span class="chip">👤 {{ item.teacher_short }}</span>{% endif %}
-        {% if item.room %}<span class="chip">🏫 ауд. {{ item.room }}</span>{% endif %}
+        {% if item.teacher_short %}<span class="chip">{{ item.teacher_short }}</span>{% endif %}
+        {% if item.room %}<span class="chip">Ауд. {{ item.room }}</span>{% endif %}
       </div>
       <div class="hero-actions">
         {% if item.zoom_link %}
-          <a class="btn-white" href="{{ item.zoom_link }}" target="_blank" rel="noopener noreferrer">🎥 Підключитися до Zoom</a>
+          <a class="btn-white" href="{{ item.zoom_link }}" target="_blank" rel="noopener noreferrer">Підключитися до Zoom</a>
         {% endif %}
-        {% if key == 'next' %}<button type="button" class="btn-ghost notify">🔔 Нагадати за 5 хв</button>{% endif %}
+        {% if key == 'next' %}<button type="button" class="btn-ghost notify">Нагадати за 5 хв</button>{% endif %}
       </div>
       {% if item.code %}
-      <div class="hero-code">🔑 Код доступу: <b>{{ item.code }}</b> <button type="button" class="copy" data-code="{{ item.code }}">Скопіювати</button></div>
+      <div class="hero-code">Код доступу: <b>{{ item.code }}</b> <button type="button" class="copy" data-code="{{ item.code }}">Скопіювати</button></div>
       {% endif %}
     </div>
     {% endif %}
@@ -867,7 +929,7 @@ MAIN_TEMPLATE = HEAD + """<body>
     {% if hero_next and hero_next.zoom_link %}
     <label class="switch">
       <input type="checkbox" id="autoJoin">
-      <div><b>Автопідключення</b><span>Zoom наступної пари відкриється сам за хвилину до початку. Вкладка з сайтом має бути відкрита.</span></div>
+      <div><b>Автопідключення до Zoom</b><span>Посилання на наступну пару відкриється за хвилину до початку, якщо ця вкладка буде відкрита.</span></div>
     </label>
     {% endif %}
   </section>
@@ -895,7 +957,7 @@ MAIN_TEMPLATE = HEAD + """<body>
     </div>
   </div>
 
-  {% if sat_note %}<div class="satnote">📌 {{ sat_note }}</div>{% endif %}
+  {% if sat_note %}<div class="satnote">{{ sat_note }}</div>{% endif %}
 
   {% if lessons %}
   <ol class="lessons">
@@ -906,16 +968,16 @@ MAIN_TEMPLATE = HEAD + """<body>
         {% if item.state == 'current' %}<span class="status live">Зараз іде</span>{% elif item.state == 'past' %}<span class="status done">Завершилась</span>{% endif %}
         <div class="name">{{ item.lesson }}</div>
         <div class="chips">
-          <span class="chip">⏰ {{ item.start }} – {{ item.end }}</span>
-          {% if item.room %}<span class="chip">🏫 ауд. {{ item.room }}</span>{% endif %}
+          <span class="chip">{{ item.start }} – {{ item.end }}</span>
+          {% if item.room %}<span class="chip">Ауд. {{ item.room }}</span>{% endif %}
         </div>
-        {% if item.teacher %}<div class="teacher">👤 {{ item.teacher }}</div>{% endif %}
-        {% if item.group %}<div class="group">👥 {{ item.group }}</div>{% endif %}
-        {% if item.code %}<div class="code">🔑 Код доступу: <b>{{ item.code }}</b> <button type="button" class="copy" data-code="{{ item.code }}">Скопіювати</button></div>{% endif %}
+        {% if item.teacher %}<div class="teacher">{{ item.teacher }}</div>{% endif %}
+        {% if item.group %}<div class="group">Група: {{ item.group }}</div>{% endif %}
+        {% if item.code %}<div class="code">Код доступу: <b>{{ item.code }}</b> <button type="button" class="copy" data-code="{{ item.code }}">Скопіювати</button></div>{% endif %}
         {% if item.backup_url %}<div class="group">Запасний варіант: <a class="alt" href="{{ item.backup_url }}" target="_blank" rel="noopener noreferrer">Zoom викладача</a>, код <b class="mono">{{ item.backup_code }}</b></div>{% endif %}
       </div>
       {% if item.zoom_link %}
-        <a class="zoom" href="{{ item.zoom_link }}" target="_blank" rel="noopener noreferrer">🎥 Підключитися до Zoom</a>
+        <a class="zoom" href="{{ item.zoom_link }}" target="_blank" rel="noopener noreferrer">Підключитися до Zoom</a>
       {% else %}
         <span class="nolink">Посилання на Zoom немає</span>
       {% endif %}
@@ -924,8 +986,8 @@ MAIN_TEMPLATE = HEAD + """<body>
   </ol>
   {% else %}
   <div class="empty">
-    <div class="big">🎉</div>
-    На цей день занять немає.<br><a href="/?date={{ next_date }}">Подивитись наступний день</a>
+    <div class="big">Занять немає</div>
+    <a href="/?date={{ next_date }}">Подивитись наступний день</a>
   </div>
   {% endif %}
 </div>

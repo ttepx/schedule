@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+.schedule_secret
+.schedule_server.pid
+server.log
+.DS_Store
